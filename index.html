@@ -24,7 +24,7 @@
     <span>🚗 Traffic</span>
     <span id="traffic-count">0</span>
   </div>
-  <input type="range" id="traffic-slider" min="0" max="200" value="0" step="1" />
+  <input type="range" id="traffic-slider" min="0" max="10000" value="0" step="1" />
   <div class="traffic-info"><span id="traffic-roads">0</span> road segments</div>
 </div>
 
@@ -56,14 +56,17 @@
   <button id="zone-draw-btn" type="button">⭕ Draw zone</button>
   <button id="zone-delete-btn" type="button">🗑️ Delete zone</button>
   <button id="ao-toggle-btn" type="button">🌑 Shadows ON</button>
+  <button id="terrain-toggle-btn" type="button">🗻 Terrain OFF</button>
+  <button id="building-labels-toggle-btn" type="button">🏷️ Building labels ON</button>
   <button id="tile-picker-btn" type="button">
-    🎯 Pick tiles<span id="tile-picker-count"></span>
+    🗑️ Delete tiles<span id="tile-picker-count"></span>
   </button>
 </div>
 
 <div id="prompt-container">
   <div id="prompt-log"></div>
   <div id="prompt-bar">
+    <button id="prompt-history-toggle" type="button" aria-expanded="false" aria-controls="prompt-log" title="Show prompt history">History ▸</button>
     <input id="prompt-input" type="text" autocomplete="off"
       placeholder='Try: build building 20m 45.443,35.557 … · traffic 50 · help' />
     <button id="prompt-send" type="button">Send</button>

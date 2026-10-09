@@ -18,7 +18,8 @@ export const DEFAULTS = {
   buildingLabels: true,
   ambientOcclusion: true,
   aoIntensity: 0.55,
-  aoOffset: 4
+  aoOffset: 4,
+  terrainVisible: false
 };
 
 export const ZONE_CLASSES = {

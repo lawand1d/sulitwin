@@ -27,7 +27,9 @@ import {
 } from './src/building-editor.js';
 import { createBuildingLabelController } from './src/building-labels.js';
 import { createBuildingNavigationController } from './src/building-navigation.js';
+import { createBuildingConstructionController } from './src/building-construction.js';
 import { createZoneController } from './src/zones.js';
+import { createTerrainController } from './src/terrain-survey.js';
 
   const MAX_BUILDING_LABELS = 10000;
   const CUSTOM_BUILDINGS_STORAGE_KEY = 'maplibre-custom-buildings-v1';
@@ -98,7 +100,17 @@ import { createZoneController } from './src/zones.js';
   let hoveredDeleteRoadId = null;
 
   const customBuildings = new Map();
+  const animatingBuildingIds = new Set();
   let buildingDragState = null;
+  const buildingConstruction = createBuildingConstructionController({
+      map,
+      onStart: (id) => animatingBuildingIds.add(id),
+      onFinish: (id) => {
+          animatingBuildingIds.delete(id);
+          refreshBuildings();
+          if (state.buildingLabels) updateBuildingLabels();
+      }
+  });
   const buildingLifecycle = createBuildingLifecycleController({
       map,
       customBuildings,
@@ -156,7 +168,8 @@ import { createZoneController } from './src/zones.js';
       getZoneDeleteState: () => zoneDeleteActive,
       cancelBuilding,
       stopBuildingEdit,
-      updateBuildingDraftData: setBuildingDraftData
+    updateBuildingDraftData: setBuildingDraftData,
+    animateNewBuilding: (building) => buildingConstruction.start(building)
   });
   const buildingSelection = createBuildingSelectionController({
       map,
@@ -221,9 +234,12 @@ import { createZoneController } from './src/zones.js';
   const ROAD_SOURCE_LAYERS = ['transportation', 'road', 'roads'];
 
   const roadPaths = new Map();
+    const roadPathKeys = new Map();
   let roadPathCounter = 0;
   let carIdCounter = 0;
   const trafficCars = [];
+    const TRAFFIC_MIN_GAP_METERS = 5.5;
+    const TRAFFIC_UPDATE_INTERVAL_MS = 50;
   let trafficTargetCount = 0;
   let trafficRafId = null;
   let trafficLastT = 0;
@@ -346,11 +362,22 @@ import { createZoneController } from './src/zones.js';
       }
 
       const stitched = stitchRoadSegments(segments);
-      roadPaths.clear();
-      roadPathCounter = 0;
+      if (trafficCars.length === 0) {
+          roadPaths.clear();
+          roadPathKeys.clear();
+          roadPathCounter = 0;
+      }
       for (const s of stitched) {
+          const endpoints = [s.coords[0], s.coords[s.coords.length - 1]]
+              .map(([lon, lat]) => `${lon.toFixed(5)},${lat.toFixed(5)}`)
+              .sort();
+          const key = `${s.cls}|${endpoints[0]}|${endpoints[1]}|${s.coords.length}`;
+          if (roadPathKeys.has(key)) continue;
           const p = preparePath(s.coords, s.cls);
-          if (p.length >= 20) roadPaths.set(p.id, p);
+          if (p.length >= 20) {
+              roadPaths.set(p.id, p);
+              roadPathKeys.set(key, p.id);
+          }
       }
       const el = document.getElementById('traffic-roads');
       if (el) el.textContent = roadPaths.size;
@@ -371,11 +398,16 @@ import { createZoneController } from './src/zones.js';
           if (pick <= 0) { chosen = p; break; }
       }
       const direction = Math.random() < 0.5 ? 1 : -1;
+      const speedRanges = {
+          motorway: [18, 26], trunk: [14, 21], primary: [11, 17],
+          secondary: [9, 14], tertiary: [7, 12]
+      };
+      const [minSpeed, maxSpeed] = speedRanges[chosen.cls] || [5, 10];
       return {
           id: `car-${++carIdCounter}`,
           pathId: chosen.id,
           t: Math.random() * chosen.length,
-          speed: 8 + Math.random() * 8,
+          speed: minSpeed + Math.random() * (maxSpeed - minSpeed),
           direction,
           laneOffset: -direction * 1.8,
           color: randomCarColor(),
@@ -397,14 +429,46 @@ import { createZoneController } from './src/zones.js';
   }
 
   function animateTraffic(now) {
+      if (now - trafficLastT < TRAFFIC_UPDATE_INTERVAL_MS) {
+          trafficRafId = requestAnimationFrame(animateTraffic);
+          return;
+      }
       const dt = Math.min(0.1, (now - trafficLastT) / 1000 || 0);
       trafficLastT = now;
+      const carsByLane = new Map();
       for (const car of trafficCars) {
           const path = roadPaths.get(car.pathId);
           if (!path) continue;
           car.t += car.speed * car.direction * dt;
-          if (car.t < 0) car.t += path.length;
-          if (car.t > path.length) car.t -= path.length;
+          if (car.t < 0) {
+              car.t = -car.t;
+              car.direction = 1;
+              car.laneOffset *= -1;
+          } else if (car.t > path.length) {
+              car.t = 2 * path.length - car.t;
+              car.direction = -1;
+              car.laneOffset *= -1;
+          }
+          const laneKey = `${car.pathId}:${car.direction}`;
+          if (!carsByLane.has(laneKey)) carsByLane.set(laneKey, []);
+          carsByLane.get(laneKey).push(car);
+      }
+      for (const cars of carsByLane.values()) {
+          const direction = cars[0].direction;
+          cars.sort((a, b) => direction > 0 ? b.t - a.t : a.t - b.t);
+          for (let i = 1; i < cars.length; i++) {
+              const leader = cars[i - 1];
+              const follower = cars[i];
+              if (direction > 0) follower.t = Math.min(follower.t, Math.max(0, leader.t - TRAFFIC_MIN_GAP_METERS));
+              else {
+                  const path = roadPaths.get(follower.pathId);
+                  follower.t = Math.max(follower.t, Math.min(path.length, leader.t + TRAFFIC_MIN_GAP_METERS));
+              }
+          }
+      }
+      for (const car of trafficCars) {
+          const path = roadPaths.get(car.pathId);
+          if (!path) continue;
           const s = samplePathPosition(path, car.t, car.direction, car.laneOffset);
           car.pos = s.pos;
           car.heading = s.heading;
@@ -417,7 +481,12 @@ import { createZoneController } from './src/zones.js';
       const src = map.getSource('traffic-cars-src');
       if (!src) return;
       const features = [];
+      const [[west, south], [east, north]] = map.getBounds().toArray();
+      const lonPadding = (east - west) * 0.1;
+      const latPadding = (north - south) * 0.1;
       for (const car of trafficCars) {
+          const [lon, lat] = car.pos;
+          if (lon < west - lonPadding || lon > east + lonPadding || lat < south - latPadding || lat > north + latPadding) continue;
           const [r, g, b] = car.color;
           const col = `rgb(${r},${g},${b})`;
           features.push({
@@ -489,7 +558,7 @@ import { createZoneController } from './src/zones.js';
   }
 
   function setTrafficCount(n) {
-      const v = Math.max(0, Math.min(200, Math.round(n)));
+    const v = Math.max(0, Math.min(10000, Math.round(n)));
       trafficTargetCount = v;
       const slider = document.getElementById('traffic-slider');
       if (slider) slider.value = String(v);
@@ -706,6 +775,7 @@ import { createZoneController } from './src/zones.js';
       const drawFeatures = cachedOsmFeatures.slice();
       const visibleEntries = cachedOsmVisibleEntries.slice();
       for (const b of customBuildings.values()) {
+          if (animatingBuildingIds.has(b.id)) continue;
           const key = `custom_${b.id}`;
           if (hiddenBuildingKeys.has(key)) continue;
           const feature = customBuildingFeature(b);
@@ -786,7 +856,9 @@ import { createZoneController } from './src/zones.js';
           map.setLayoutProperty('buildings-shadow', 'visibility',
               state.buildings && state.ambientOcclusion ? 'visible' : 'none');
       }
-      if (map.getLayer('building-labels')) map.setLayoutProperty('building-labels', 'visibility', vis);
+      if (map.getLayer('building-labels')) {
+          map.setLayoutProperty('building-labels', 'visibility', state.buildingLabels ? vis : 'none');
+      }
       if (map.getLayer('building-highlights')) map.setLayoutProperty('building-highlights', 'visibility', vis);
       dbg(`Buildings: ${state.buildings ? 'visible' : 'hidden'}`);
   }
@@ -813,6 +885,20 @@ import { createZoneController } from './src/zones.js';
 
   function updateBuildingLabels() {
       buildingLabelController.updateBuildingLabels();
+  }
+
+  function updateBuildingLabelsToggle() {
+      const button = document.getElementById('building-labels-toggle-btn');
+      if (!button) return;
+      button.textContent = state.buildingLabels ? '🏷️ Building labels ON' : '🏷️ Building labels OFF';
+      button.classList.toggle('active', state.buildingLabels);
+  }
+
+  function setBuildingLabelsVisible(visible) {
+      state.buildingLabels = !!visible;
+      if (state.buildingLabels) updateBuildingLabels();
+      else if (map.getLayer('building-labels')) map.setLayoutProperty('building-labels', 'visibility', 'none');
+      updateBuildingLabelsToggle();
   }
 
   function rebuildHighlights() {
@@ -865,6 +951,8 @@ import { createZoneController } from './src/zones.js';
       }
   });
   weather.bind();
+
+  const terrainController = createTerrainController({ map, state, dbg, logPrompt });
 
   const overlayHelpers = createMapOverlayHelpers({
       map,
@@ -1453,6 +1541,15 @@ import { createZoneController } from './src/zones.js';
   const promptInput = document.getElementById('prompt-input');
   const promptSend  = document.getElementById('prompt-send');
   const promptLog   = document.getElementById('prompt-log');
+    const promptHistoryToggle = document.getElementById('prompt-history-toggle');
+
+    function setPromptHistoryExpanded(expanded) {
+            promptLog.classList.toggle('visible', expanded);
+            promptHistoryToggle.setAttribute('aria-expanded', String(expanded));
+            promptHistoryToggle.textContent = expanded ? 'History ▾' : 'History ▸';
+            promptHistoryToggle.title = expanded ? 'Hide prompt history' : 'Show prompt history';
+            if (expanded) promptLog.scrollTop = promptLog.scrollHeight;
+    }
 
   const COLOR_NAMES = {
       red:'#d32f2f', crimson:'#c62828', blue:'#1e6fbf', lightblue:'#8fc0e8',
@@ -1479,7 +1576,6 @@ import { createZoneController } from './src/zones.js';
       promptLog.appendChild(line);
       while (promptLog.children.length > 30) promptLog.removeChild(promptLog.firstChild);
       promptLog.scrollTop = promptLog.scrollHeight;
-      promptLog.classList.add('visible');
   }
 
   function printHelp() {
@@ -1503,8 +1599,9 @@ import { createZoneController } from './src/zones.js';
       logPrompt('info', '• zone <lat>,<lon> <radius>m <Flood|Green|Shade>');
       logPrompt('info', '• draw zone / cancel zone / delete zone / list zones / clear all zones');
       logPrompt('info', '• zone class <Z#> <Flood|Green|Shade> / info zone <Z#> / delete zone <Z#>');
-      logPrompt('info', '• traffic <0-200> / traffic on / traffic off / clear traffic');
+    logPrompt('info', '• traffic <0-10000> / traffic on / traffic off / clear traffic');
       logPrompt('info', '• shadows on / shadows off / shadows <0-1> / shadows offset <px>');
+      logPrompt('info', '• terrain on / terrain off');
       logPrompt('info', '• pick tiles / stop picking / hide tile / show all tiles');
       logPrompt('info', '• haze <0-100>% / auto / off');
       logPrompt('info', '• roads <color> / roads <0-100>% / road border <color>');
@@ -1521,7 +1618,8 @@ import { createZoneController } from './src/zones.js';
           buildingLabels: DEFAULTS.buildingLabels,
           ambientOcclusion: DEFAULTS.ambientOcclusion,
           aoIntensity: DEFAULTS.aoIntensity,
-          aoOffset: DEFAULTS.aoOffset
+          aoOffset: DEFAULTS.aoOffset,
+          terrainVisible: DEFAULTS.terrainVisible
       });
       clearHighlights();
       hiddenBuildingKeys.clear();
@@ -1559,6 +1657,9 @@ import { createZoneController } from './src/zones.js';
       setTrafficCount(0);
 
       refreshBuildings();
+    if (state.buildingLabels) updateBuildingLabels();
+    updateBuildingLabelsToggle();
+    terrainController.updateVisibility();
       applyRoads(); applyBuildings(); applyLabels();
       applyAmbientOcclusion();
       overlayEl.style.opacity = state.hazeForce;
@@ -1574,13 +1675,17 @@ import { createZoneController } from './src/zones.js';
       { re: /^reset$/i, run: () => doReset() },
 
       { re: /^(?:label|letter|number)\s+buildings?$/i,
-        run: () => { state.buildingLabels = true; updateBuildingLabels(); logPrompt('bot', 'Labeling visible buildings.'); }},
+                run: () => {
+                        setBuildingLabelsVisible(true);
+                        logPrompt('bot', 'Labeling visible buildings.');
+                }},
       { re: /^(?:unlabel|clear\s+labels?|remove\s+building\s+labels?)\s*(?:buildings?)?$/i,
         run: () => {
             state.buildingLabels = false;
             if (map.getLayer('building-labels')) map.removeLayer('building-labels');
             if (map.getSource('building-labels-src')) map.removeSource('building-labels-src');
             labeledBuildings.clear();
+                        updateBuildingLabelsToggle();
             logPrompt('bot', 'Building labels removed.');
         }},
 
@@ -1631,7 +1736,9 @@ import { createZoneController } from './src/zones.js';
             const height = (parsed.height !== null && parsed.height > 0) ? parsed.height : buildingDefaultHeight;
             const coords = parsed.coords.map(([lat, lon]) => [lon, lat]);
             const id = `custom-${++buildingIdCounter}`;
-            customBuildings.set(id, { id, coords, height, base: 0, color: buildingDefaultColor });
+            const building = { id, coords, height, base: 0, color: buildingDefaultColor };
+            customBuildings.set(id, building);
+            buildingConstruction.start(building);
             refreshBuildings();
             if (state.buildingLabels) updateBuildingLabels();
             saveCustomBuildings();
@@ -1746,6 +1853,10 @@ import { createZoneController } from './src/zones.js';
             applyAmbientOcclusion();
             logPrompt('bot', `Shadows offset set to ${state.aoOffset}px.`);
         } },
+      { re: /^(?:terrain|topo)\s+(?:on|enable)$/i,
+        run: () => terrainController.setEnabled(true) },
+      { re: /^(?:terrain|topo)\s+(?:off|disable)$/i,
+        run: () => terrainController.setEnabled(false) },
 
       { re: /^pick tiles?$/i, run: () => setTilePickerActive(true) },
       { re: /^stop picking$/i, run: () => setTilePickerActive(false) },
@@ -1858,11 +1969,18 @@ import { createZoneController } from './src/zones.js';
   });
   promptInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); promptSend.click(); }
-      if (e.key === 'Escape') { promptLog.classList.remove('visible'); promptInput.blur(); }
+      if (e.key === 'Escape') { setPromptHistoryExpanded(false); promptInput.blur(); }
   });
-  promptInput.addEventListener('focus', () => promptLog.classList.add('visible'));
+  promptHistoryToggle.addEventListener('click', () => {
+      setPromptHistoryExpanded(promptHistoryToggle.getAttribute('aria-expanded') !== 'true');
+  });
 
-  document.getElementById('tile-picker-btn').addEventListener('click', () => setTilePickerActive(!tilePickerActive));
+    updateBuildingLabelsToggle();
+    document.getElementById('building-labels-toggle-btn').addEventListener('click', () => {
+            setBuildingLabelsVisible(!state.buildingLabels);
+            logPrompt('bot', `Building labels ${state.buildingLabels ? 'ON' : 'OFF'}.`);
+    });
+    document.getElementById('tile-picker-btn').addEventListener('click', () => setTilePickerActive(!tilePickerActive));
   document.getElementById('road-draw-btn').addEventListener('click', () => { if (roadDrawActive) finishRoad(); else startRoadDrawing(); });
   document.getElementById('road-delete-btn').addEventListener('click', () => startRoadDeleting());
   document.getElementById('building-build-btn').addEventListener('click', () => {
@@ -1883,6 +2001,9 @@ import { createZoneController } from './src/zones.js';
       applyAmbientOcclusion();
       applyBuildings();
       logPrompt('bot', `Shadows ${state.ambientOcclusion ? 'ON' : 'OFF'}.`);
+  });
+  document.getElementById('terrain-toggle-btn').addEventListener('click', () => {
+      terrainController.setEnabled(!terrainController.isEnabled());
   });
   document.querySelectorAll('.zone-class-btn').forEach(btn => {
       btn.addEventListener('click', () => commitPendingZone(btn.dataset.class));
@@ -2118,11 +2239,13 @@ import { createZoneController } from './src/zones.js';
       }
 
       setupLiveBuildingsLayer();
+    buildingConstruction.ensureLayers();
       ensureRoadLoaderLayer();
       createRoadLayers();
       createBuildingEditorLayers();
       createBuildingDeleteLayers();
       createZoneLayers();
+      terrainController.ensureTerrainLayers();
       rebuildHiddenTileCovers();
 
       const loadedCount = loadCustomBuildings();

@@ -272,7 +272,8 @@ export function createBuildingLifecycleController({
   cancelBuilding,
   stopBuildingEdit,
   setBuildingDeleteActiveState,
-  updateBuildingDraftData
+  updateBuildingDraftData,
+  animateNewBuilding
 }) {
   function setBuildingDraftData() {
     const fillSrc = map.getSource('building-draft-fill-src');
@@ -348,9 +349,11 @@ export function createBuildingLifecycleController({
     const nextIdNumber = getBuildingIdCounter() + 1;
     setBuildingIdCounter(nextIdNumber);
     const id = `custom-${nextIdNumber}`;
-    customBuildings.set(id, {
+    const building = {
       id, coords: pending.coords, height, base: 0, color: getBuildingDefaultColor()
-    });
+    };
+    customBuildings.set(id, building);
+    if (typeof animateNewBuilding === 'function') animateNewBuilding(building);
     setPendingBuilding(null);
     setBuildingDraftCoords([]);
     setBuildingDraftCursor(null);

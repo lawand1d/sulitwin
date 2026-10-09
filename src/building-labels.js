@@ -86,7 +86,7 @@ export function createBuildingLabelController({
         }
       });
     }
-    map.setLayoutProperty('building-labels', 'visibility', state.buildings ? 'visible' : 'none');
+    map.setLayoutProperty('building-labels', 'visibility', state.buildings && state.buildingLabels ? 'visible' : 'none');
   }
 
   function rebuildHighlights() {

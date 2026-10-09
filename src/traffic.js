@@ -14,12 +14,12 @@ export function stitchRoadSegments(segments) {
   const key = (lon, lat) => `${lon.toFixed(5)},${lat.toFixed(5)}`;
   const index = new Map();
   segments.forEach((seg, i) => {
-    const a = key(seg.coords[0][0], seg.coords[0][1]);
-    const b = key(seg.coords[seg.coords.length - 1][0], seg.coords[seg.coords.length - 1][1]);
+    const a = `${seg.cls}|${key(seg.coords[0][0], seg.coords[0][1])}`;
+    const b = `${seg.cls}|${key(seg.coords[seg.coords.length - 1][0], seg.coords[seg.coords.length - 1][1])}`;
     if (!index.has(a)) index.set(a, []);
     if (!index.has(b)) index.set(b, []);
-    index.get(a).push({ seg: i });
-    index.get(b).push({ seg: i });
+    index.get(a).push({ seg: i, side: 0 });
+    index.get(b).push({ seg: i, side: 1 });
   });
   const used = new Array(segments.length).fill(false);
   const paths = [];
@@ -28,36 +28,23 @@ export function stitchRoadSegments(segments) {
     used[i] = true;
     let coords = segments[i].coords.slice();
     const cls = segments[i].cls;
-    while (true) {
-      const lastKey = key(coords[coords.length - 1][0], coords[coords.length - 1][1]);
-      const cands = index.get(lastKey) || [];
-      let next = -1;
-      for (const c of cands) {
-        if (used[c.seg] || segments[c.seg].cls !== cls) continue;
-        next = c.seg; break;
+    const extend = (atEnd) => {
+      while (true) {
+        const endpoint = atEnd ? coords[coords.length - 1] : coords[0];
+        const endpointKey = `${cls}|${key(endpoint[0], endpoint[1])}`;
+        const connected = index.get(endpointKey) || [];
+        if (connected.length !== 2) break;
+        const next = connected.find(item => !used[item.seg]);
+        if (!next) break;
+        used[next.seg] = true;
+        let nextCoords = segments[next.seg].coords;
+        if ((atEnd && next.side === 1) || (!atEnd && next.side === 0)) nextCoords = nextCoords.slice().reverse();
+        if (atEnd) coords = coords.concat(nextCoords.slice(1));
+        else coords = nextCoords.slice(0, -1).concat(coords);
       }
-      if (next < 0) break;
-      used[next] = true;
-      const nc = segments[next].coords;
-      if (key(nc[0][0], nc[0][1]) === lastKey) coords = coords.concat(nc.slice(1));
-      else coords = coords.concat(nc.slice(0, -1).reverse());
-    }
-    while (true) {
-      const firstKey = key(coords[0][0], coords[0][1]);
-      const cands = index.get(firstKey) || [];
-      let prev = -1;
-      for (const c of cands) {
-        if (used[c.seg] || segments[c.seg].cls !== cls) continue;
-        prev = c.seg; break;
-      }
-      if (prev < 0) break;
-      used[prev] = true;
-      const pc = segments[prev].coords;
-      if (key(pc[pc.length - 1][0], pc[pc.length - 1][1]) === firstKey)
-        coords = pc.slice(0, -1).concat(coords);
-      else
-        coords = pc.slice(1).reverse().concat(coords);
-    }
+    };
+    extend(true);
+    extend(false);
     if (coords.length >= 2) paths.push({ coords, cls });
   }
   return paths;
@@ -81,9 +68,14 @@ export function samplePathPosition(path, t, direction, laneOffset) {
   const total = path.length;
   if (total <= 0) return { pos: [0, 0, 0], heading: 0 };
   let d = ((t % total) + total) % total;
-  let i = 1;
-  while (i < path.cum.length && path.cum[i] < d) i++;
-  if (i >= path.cum.length) i = path.cum.length - 1;
+  let low = 1;
+  let high = path.cum.length - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (path.cum[mid] < d) low = mid + 1;
+    else high = mid;
+  }
+  const i = low;
   const c0 = path.coords[i - 1];
   const c1 = path.coords[i];
   const segStart = path.cum[i - 1];
