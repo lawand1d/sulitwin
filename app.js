@@ -28,6 +28,7 @@ import {
 import { createBuildingLabelController } from './src/building-labels.js';
 import { createBuildingNavigationController } from './src/building-navigation.js';
 import { createBuildingConstructionController } from './src/building-construction.js';
+import { trafficDemandAt } from './src/traffic-demand.js';
 import { createZoneController } from './src/zones.js';
 import { createTerrainController } from './src/terrain-survey.js';
 
@@ -40,6 +41,29 @@ import { createTerrainController } from './src/terrain-survey.js';
   const statusBodyEl = document.getElementById('status-body');
   const statusToggleEl = document.getElementById('status-toggle');
   const overlayEl = document.getElementById('visibility-overlay');
+  const clockTimeEl = document.getElementById('map-clock-time');
+  const clockDateEl = document.getElementById('map-clock-date');
+  const clockTimeFormatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Baghdad',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+  });
+  const clockDateFormatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Baghdad',
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+  });
+  function updateMapClock() {
+      const now = new Date();
+      clockTimeEl.textContent = clockTimeFormatter.format(now);
+      clockDateEl.textContent = clockDateFormatter.format(now);
+  }
+  updateMapClock();
+  setInterval(updateMapClock, 1000);
   const { dbg, setExpanded } = createDebugController({ statusEl, statusBodyEl, statusToggleEl });
   statusToggleEl.addEventListener('click', e => {
       e.stopPropagation(); setExpanded(!statusEl.classList.contains('expanded'));
@@ -428,6 +452,22 @@ import { createTerrainController } from './src/terrain-survey.js';
       updateTrafficLayer();
   }
 
+  function updateTrafficDemand() {
+      if (!map.isStyleLoaded()) return;
+      const demand = trafficDemandAt(new Date());
+      const target = demand.count;
+      trafficTargetCount = target;
+      const profile = document.getElementById('traffic-profile');
+      if (profile) {
+          profile.textContent = `ESTIMATED · ${demand.time} · ${demand.profile} · ${target.toLocaleString()} simulated cars`;
+          profile.title = 'Typical traffic model derived from the traffic.zip demand profile; no live traffic data exists for Sulaimani.';
+      }
+      if (roadPaths.size === 0) extractRoadPathsFromTiles();
+      setupTrafficOverlay();
+      adjustTrafficCount(target);
+      startTrafficAnimation();
+  }
+
   function animateTraffic(now) {
       if (now - trafficLastT < TRAFFIC_UPDATE_INTERVAL_MS) {
           trafficRafId = requestAnimationFrame(animateTraffic);
@@ -541,34 +581,6 @@ import { createTerrainController } from './src/terrain-survey.js';
       trafficLastT = performance.now();
       trafficRafId = requestAnimationFrame(animateTraffic);
       dbg('Traffic: animation started.');
-  }
-
-  function bindTrafficSlider() {
-      const slider = document.getElementById('traffic-slider');
-      if (!slider) return;
-      slider.addEventListener('input', () => {
-          trafficTargetCount = parseInt(slider.value, 10) || 0;
-          if (roadPaths.size === 0) extractRoadPathsFromTiles();
-          adjustTrafficCount(trafficTargetCount);
-          if (trafficTargetCount > 0) {
-              setupTrafficOverlay();
-              startTrafficAnimation();
-          }
-      });
-  }
-
-  function setTrafficCount(n) {
-    const v = Math.max(0, Math.min(10000, Math.round(n)));
-      trafficTargetCount = v;
-      const slider = document.getElementById('traffic-slider');
-      if (slider) slider.value = String(v);
-      if (roadPaths.size === 0) extractRoadPathsFromTiles();
-      adjustTrafficCount(v);
-      if (v > 0) {
-          setupTrafficOverlay();
-          startTrafficAnimation();
-      }
-      return v;
   }
 
   const keyToLetter = new Map();
@@ -1599,7 +1611,7 @@ import { createTerrainController } from './src/terrain-survey.js';
       logPrompt('info', '• zone <lat>,<lon> <radius>m <Flood|Green|Shade>');
       logPrompt('info', '• draw zone / cancel zone / delete zone / list zones / clear all zones');
       logPrompt('info', '• zone class <Z#> <Flood|Green|Shade> / info zone <Z#> / delete zone <Z#>');
-    logPrompt('info', '• traffic <0-10000> / traffic on / traffic off / clear traffic');
+    logPrompt('info', '• traffic status · typical demand is estimated from local time and weekday');
       logPrompt('info', '• shadows on / shadows off / shadows <0-1> / shadows offset <px>');
       logPrompt('info', '• terrain on / terrain off');
       logPrompt('info', '• pick tiles / stop picking / hide tile / show all tiles');
@@ -1653,8 +1665,7 @@ import { createTerrainController } from './src/terrain-survey.js';
       if (zoneDeleteActive) setZoneDeleteActive(false);
       clearZoneDeleteHover();
 
-      // Traffic reset
-      setTrafficCount(0);
+    updateTrafficDemand();
 
       refreshBuildings();
     if (state.buildingLabels) updateBuildingLabels();
@@ -1813,21 +1824,10 @@ import { createTerrainController } from './src/terrain-survey.js';
       } },
 
       // ---- Traffic commands ----
-      { re: /^traffic\s+(\d+)$/i, run: m => {
-          const n = setTrafficCount(parseInt(m[1], 10));
-          logPrompt('bot', `Traffic set to ${n} cars.`);
-      }},
-      { re: /^traffic\s+(?:on|start)$/i, run: () => {
-          setTrafficCount(50);
-          logPrompt('bot', 'Traffic ON (50 cars).');
-      }},
-      { re: /^traffic\s+(?:off|stop)$/i, run: () => {
-          setTrafficCount(0);
-          logPrompt('bot', 'Traffic OFF.');
-      }},
-      { re: /^clear\s+traffic$/i, run: () => {
-          setTrafficCount(0);
-          logPrompt('bot', 'Traffic cleared.');
+      { re: /^traffic(?:\s+status)?$/i, run: () => {
+          const demand = trafficDemandAt(new Date());
+          logPrompt('info', `ESTIMATED ${trafficTargetCount.toLocaleString()} simulated cars · ${demand.time} · ${demand.profile}.`);
+          logPrompt('info', 'Typical-traffic model from traffic.zip; no live traffic data exists for Sulaimani.');
       }},
       { re: /^refresh\s+(?:road\s+)?paths$/i, run: () => {
           const n = extractRoadPathsFromTiles();
@@ -1981,6 +1981,15 @@ import { createTerrainController } from './src/terrain-survey.js';
             logPrompt('bot', `Building labels ${state.buildingLabels ? 'ON' : 'OFF'}.`);
     });
     document.getElementById('tile-picker-btn').addEventListener('click', () => setTilePickerActive(!tilePickerActive));
+    document.getElementById('tools-drawer-toggle').addEventListener('click', () => {
+            const drawer = document.getElementById('tools-drawer');
+            const expanded = drawer.classList.toggle('collapsed') === false;
+            const button = document.getElementById('tools-drawer-toggle');
+            button.setAttribute('aria-expanded', String(expanded));
+            button.setAttribute('aria-label', expanded ? 'Hide map tools' : 'Show map tools');
+            button.title = expanded ? 'Hide map tools' : 'Show map tools';
+            button.textContent = expanded ? '›' : '‹';
+    });
   document.getElementById('road-draw-btn').addEventListener('click', () => { if (roadDrawActive) finishRoad(); else startRoadDrawing(); });
   document.getElementById('road-delete-btn').addEventListener('click', () => startRoadDeleting());
   document.getElementById('building-build-btn').addEventListener('click', () => {
@@ -2273,8 +2282,8 @@ import { createTerrainController } from './src/terrain-survey.js';
       applyAmbientOcclusion();
 
       // Traffic setup
-      bindTrafficSlider();
       setupTrafficOverlay();
+    setInterval(updateTrafficDemand, 30000);
 
       setTimeout(() => {
           if (!initialPopulateDone) {
@@ -2286,13 +2295,17 @@ import { createTerrainController } from './src/terrain-survey.js';
               if (state.buildingLabels) updateBuildingLabels();
           }
           extractRoadPathsFromTiles();
+          updateTrafficDemand();
           if (roadPaths.size === 0) {
-              map.once('idle', () => extractRoadPathsFromTiles());
+              map.once('idle', () => {
+                  extractRoadPathsFromTiles();
+                  updateTrafficDemand();
+              });
           }
       }, 1500);
 
       setTimeout(() => reportTileStats(true), 1500);
       logPrompt('info', 'Ready. Haze = 20%, cast shadows ON, traffic available.');
-      logPrompt('info', 'Drag the 🚗 Traffic slider (top-left) or type "traffic 50".');
+    logPrompt('info', 'Traffic count follows the estimated Sulaimani time-of-day profile. Type "traffic status" for details.');
       logPrompt('info', 'Type "help" for the full command list.');
   });
