@@ -117,3 +117,267 @@ export function createRoadLayerController({ map, dbg }) {
     updateRoadDeleteButton
   };
 }
+
+export function createRoadLifecycleController({
+  map,
+  dbg,
+  getRoadDrawActive,
+  setRoadDrawActive,
+  getRoadDeleteActive,
+  setRoadDeleteActive,
+  getDraftCoords,
+  setDraftCoords,
+  getDraftCursor,
+  setDraftCursor,
+  getDrawnRoads,
+  setDrawnRoads,
+  getHoveredDeleteRoadId,
+  setHoveredDeleteRoadId,
+  getRoadIdCounter,
+  setRoadIdCounter,
+  getRoadDrawColor,
+  setRoadDrawColor,
+  getRoadDrawWidth,
+  setRoadDrawWidth,
+  createRoadLayers,
+  positionRoadLayers,
+  refreshDrawnRoads,
+  setDraftData,
+  clearDeleteHover,
+  updateRoadDrawButton,
+  updateRoadDeleteButton,
+  getTilePickerActive,
+  setTilePickerActive,
+  getBuildingDrawActive,
+  cancelBuilding,
+  getBuildingEditActive,
+  stopBuildingEdit,
+  getBuildingDeleteActive,
+  setBuildingDeleteActive,
+  getZoneDrawActive,
+  cancelZone,
+  getZoneDeleteActive,
+  setZoneDeleteActive,
+  logPrompt,
+  resolveColor
+}) {
+  function setRoadDrawState(active) {
+    if (active) {
+      if (getTilePickerActive()) setTilePickerActive(false);
+      if (getRoadDeleteActive()) setRoadDeleteActive(false);
+      if (getBuildingDrawActive()) cancelBuilding();
+      if (getBuildingEditActive()) stopBuildingEdit();
+      if (getBuildingDeleteActive()) setBuildingDeleteActive(false);
+      if (getZoneDrawActive()) cancelZone();
+      if (getZoneDeleteActive()) setZoneDeleteActive(false);
+    }
+    setRoadDrawActive(active);
+    if (active) {
+      if (!map.getLayer('drawn-roads')) createRoadLayers();
+      else positionRoadLayers();
+      map.doubleClickZoom.disable();
+      map.getCanvas().style.cursor = 'crosshair';
+    } else {
+      map.doubleClickZoom.enable();
+      if (!getRoadDeleteActive()) map.getCanvas().style.cursor = '';
+      setDraftCursor(null);
+    }
+    updateRoadDrawButton({ roadDrawActive: getRoadDrawActive(), draftCoords: getDraftCoords(), drawnRoads: getDrawnRoads() });
+    setDraftData();
+  }
+
+  function setRoadDeleteState(active) {
+    if (active) {
+      if (getTilePickerActive()) setTilePickerActive(false);
+      if (getRoadDrawActive()) setRoadDrawState(false);
+      if (getBuildingDrawActive()) cancelBuilding();
+      if (getBuildingEditActive()) stopBuildingEdit();
+      if (getBuildingDeleteActive()) setBuildingDeleteActive(false);
+      if (getZoneDrawActive()) cancelZone();
+      if (getZoneDeleteActive()) setZoneDeleteActive(false);
+    }
+    setRoadDeleteActive(active);
+    if (active) {
+      if (!map.getLayer('drawn-roads')) createRoadLayers();
+      else positionRoadLayers();
+      map.getCanvas().style.cursor = 'crosshair';
+      if (!getDrawnRoads().size) logPrompt('info', 'No drawn roads to delete yet.');
+    } else {
+      clearDeleteHover();
+      map.getCanvas().style.cursor = '';
+    }
+    updateRoadDeleteButton({ roadDeleteActive: getRoadDeleteActive(), drawnRoads: getDrawnRoads() });
+  }
+
+  function startRoadDrawing() {
+    if (getRoadDrawActive()) return logPrompt('info', 'Already drawing.');
+    setDraftCoords([]);
+    setDraftCursor(null);
+    setRoadDrawState(true);
+    logPrompt('bot', `Road drawing ON — color ${getRoadDrawColor()}, width ${getRoadDrawWidth()} m.`);
+  }
+
+  function startRoadDeleting() {
+    if (getRoadDeleteActive()) { setRoadDeleteState(false); return logPrompt('info', 'Road deletion OFF.'); }
+    setRoadDeleteState(true);
+    logPrompt('bot', 'Road deletion ON — hover a road and click to delete it.');
+  }
+
+  function finishRoad() {
+    if (!getRoadDrawActive()) return logPrompt('info', 'Not drawing.');
+    if (getDraftCoords().length < 2) {
+      logPrompt('error', 'A road needs at least 2 points — cancelled.');
+      return cancelRoad();
+    }
+    const nextIdNumber = getRoadIdCounter() + 1;
+    setRoadIdCounter(nextIdNumber);
+    const id = `road-${nextIdNumber}`;
+    const n = getDraftCoords().length;
+    const roads = getDrawnRoads();
+    roads.set(id, { id, coords: getDraftCoords().slice(), color: '#ff0000', width: getRoadDrawWidth() });
+    setDrawnRoads(roads);
+    setDraftCoords([]);
+    setDraftCursor(null);
+    setRoadDrawState(false);
+    refreshDrawnRoads();
+    setDraftData();
+    positionRoadLayers();
+    logPrompt('bot', `Added ${id} (${n} points).`);
+  }
+
+  function cancelRoad() {
+    if (!getRoadDrawActive() && !getDraftCoords().length) return logPrompt('info', 'Not drawing.');
+    setDraftCoords([]);
+    setDraftCursor(null);
+    setRoadDrawState(false);
+    setDraftData();
+    logPrompt('bot', 'Road drawing cancelled.');
+  }
+
+  function addDraftPoint(lon, lat) {
+    const coords = getDraftCoords();
+    coords.push([lon, lat]);
+    setDraftCoords(coords);
+    setDraftCursor([lon, lat]);
+    setDraftData();
+  }
+
+  function undoDraftPoint() {
+    if (!getRoadDrawActive()) return logPrompt('info', 'Not drawing.');
+    const coords = getDraftCoords();
+    if (!coords.length) return logPrompt('info', 'No points to undo.');
+    coords.pop();
+    setDraftCoords(coords);
+    setDraftData();
+    logPrompt('info', `Point removed — ${coords.length} left.`);
+  }
+
+  function clearAllRoads() {
+    if (!getDrawnRoads().size) return logPrompt('info', 'No drawn roads.');
+    const n = getDrawnRoads().size;
+    getDrawnRoads().clear();
+    clearDeleteHover();
+    refreshDrawnRoads();
+    logPrompt('bot', `${n} drawn road(s) removed.`);
+  }
+
+  function listRoads() {
+    if (!getDrawnRoads().size) return logPrompt('info', 'No drawn roads yet.');
+    logPrompt('info', `Drawn roads: ${getDrawnRoads().size}`);
+    for (const r of getDrawnRoads().values()) {
+      const [lon, lat] = r.coords[0];
+      logPrompt('info', `  ${r.id}  ${r.coords.length} pts  ${r.color}  w=${r.width}m  start ${lat.toFixed(5)},${lon.toFixed(5)}`);
+    }
+  }
+
+  function deleteRoadById(id) {
+    if (!getDrawnRoads().has(id)) return false;
+    getDrawnRoads().delete(id);
+    if (getHoveredDeleteRoadId() === id) clearDeleteHover();
+    refreshDrawnRoads();
+    return true;
+  }
+
+  function findRoadAtPoint(point) {
+    if (!map.getLayer('drawn-roads')) return null;
+    let hits;
+    try { hits = map.queryRenderedFeatures(point, { layers: ['drawn-roads'] }); }
+    catch (e) { return null; }
+    if (!hits || !hits.length) return null;
+    for (const h of hits) {
+      const id = h.properties && h.properties.id;
+      if (id && getDrawnRoads().has(id)) return getDrawnRoads().get(id);
+    }
+    return null;
+  }
+
+  function setDeleteHover(road) {
+    if (!road) { clearDeleteHover(); return; }
+    setHoveredDeleteRoadId(road.id);
+    const src = map.getSource('road-delete-hover-src');
+    if (!src) return;
+    src.setData({
+      type: 'FeatureCollection',
+      features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: road.coords } }]
+    });
+  }
+
+  function clearDeleteHover() {
+    setHoveredDeleteRoadId(null);
+    const src = map.getSource('road-delete-hover-src');
+    if (src) src.setData({ type: 'FeatureCollection', features: [] });
+  }
+
+  function setRoadColor(name) {
+    const c = resolveColor(name);
+    if (!c) return logPrompt('error', `Unknown color: "${name}"`);
+    setRoadDrawColor(c);
+    logPrompt('bot', `Draft colour set to ${c}.`);
+  }
+
+  function setRoadWidth(n) {
+    const v = Math.max(0.5, Math.min(60, n));
+    setRoadDrawWidth(v);
+    logPrompt('bot', `Road width set to ${v} m.`);
+  }
+
+  function setDraftData() {
+    const lineSrc = map.getSource('road-draft-src');
+    if (lineSrc) {
+      const coords = getDraftCoords().slice();
+      if (getRoadDrawActive() && getDraftCursor() && coords.length) coords.push(getDraftCursor());
+      lineSrc.setData({
+        type: 'FeatureCollection',
+        features: coords.length >= 2 ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }] : []
+      });
+    }
+    const ptSrc = map.getSource('road-draft-points-src');
+    if (ptSrc) {
+      ptSrc.setData({
+        type: 'FeatureCollection',
+        features: getDraftCoords().map(c => ({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } }))
+      });
+    }
+    updateRoadDrawButton({ roadDrawActive: getRoadDrawActive(), draftCoords: getDraftCoords(), drawnRoads: getDrawnRoads() });
+  }
+
+  return {
+    setRoadDrawState,
+    setRoadDeleteState,
+    startRoadDrawing,
+    startRoadDeleting,
+    finishRoad,
+    cancelRoad,
+    addDraftPoint,
+    undoDraftPoint,
+    clearAllRoads,
+    listRoads,
+    deleteRoadById,
+    findRoadAtPoint,
+    setDeleteHover,
+    clearDeleteHover,
+    setRoadColor,
+    setRoadWidth,
+    setDraftData
+  };
+}

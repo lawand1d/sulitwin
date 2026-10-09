@@ -18,12 +18,16 @@ import { createDebugController } from './src/debug.js';
 import { createWeatherController } from './src/weather.js';
 import { createParkController } from './src/parks.js';
 import { createMapOverlayHelpers } from './src/map-overlays.js';
-import { createRoadLayerController } from './src/road-layers.js';
+import { createRoadLayerController, createRoadLifecycleController } from './src/road-layers.js';
 import {
   createBuildingEditorController,
   createBuildingSelectionController,
-  createBuildingInteractionController
+  createBuildingInteractionController,
+  createBuildingLifecycleController
 } from './src/building-editor.js';
+import { createBuildingLabelController } from './src/building-labels.js';
+import { createBuildingNavigationController } from './src/building-navigation.js';
+import { createZoneController } from './src/zones.js';
 
   const MAX_BUILDING_LABELS = 10000;
   const CUSTOM_BUILDINGS_STORAGE_KEY = 'maplibre-custom-buildings-v1';
@@ -95,6 +99,65 @@ import {
 
   const customBuildings = new Map();
   let buildingDragState = null;
+  const buildingLifecycle = createBuildingLifecycleController({
+      map,
+      customBuildings,
+      getBuildingIdCounter: () => buildingIdCounter,
+      setBuildingIdCounter: (n) => { buildingIdCounter = n; },
+      getBuildingDraftCoords: () => buildingDraftCoords,
+      setBuildingDraftCoords: (v) => { buildingDraftCoords = v; },
+      getBuildingDraftCursor: () => buildingDraftCursor,
+      setBuildingDraftCursor: (v) => { buildingDraftCursor = v; },
+      getPendingBuilding: () => pendingBuilding,
+      setPendingBuilding: (v) => { pendingBuilding = v; },
+      getBuildingDrawActive: () => buildingDrawActive,
+      setBuildingDrawActive: (v) => { buildingDrawActive = v; },
+      getBuildingEditActive: () => buildingEditActive,
+      setBuildingEditActive: (v) => { buildingEditActive = v; },
+      getBuildingDeleteActive: () => buildingDeleteActive,
+      setBuildingDeleteActive: (v) => { buildingDeleteActive = v; },
+      getSelectedBuildingId: () => selectedBuildingId,
+      setSelectedBuildingId: (v) => { selectedBuildingId = v; },
+      getBuildingDefaultHeight: () => buildingDefaultHeight,
+      setBuildingDefaultHeight: (v) => { buildingDefaultHeight = v; },
+      getBuildingDefaultColor: () => buildingDefaultColor,
+      setBuildingDefaultColor: (v) => { buildingDefaultColor = v; },
+      updateSelectionOverlay,
+      refreshBuildings,
+      saveCustomBuildings,
+      state,
+      updateBuildingLabels,
+      updateBuildingBuildButton,
+      updateBuildingDeleteButton,
+      updateBuildingEditButton,
+      createBuildingEditorLayers,
+      createBuildingDeleteLayers,
+      clearBuildingDeleteHover,
+      logPrompt,
+      resolveColor,
+      centerOfCoordinates,
+      getTilePickerActive: () => tilePickerActive,
+      setTilePickerActive: (v) => { tilePickerActive = v; },
+      cancelRoad,
+      getRoadDrawActive: () => roadDrawActive,
+      setRoadDrawActive: (v) => { roadDrawActive = v; },
+      setRoadDeleteActive: (v) => { roadDeleteActive = v; },
+      getRoadDeleteActive: () => roadDeleteActive,
+      cancelZone,
+      setZoneDeleteActive: (v) => { zoneDeleteActive = v; },
+      getZoneDeleteActive: () => zoneDeleteActive,
+      setZoneDrawActive: (v) => { zoneDrawActive = v; },
+      getZoneDrawActive: () => zoneDrawActive,
+      getBuildingDeleteActiveState: () => buildingDeleteActive,
+      getTilePickerState: () => tilePickerActive,
+      getRoadDrawState: () => roadDrawActive,
+      getRoadDeleteState: () => roadDeleteActive,
+      getZoneDrawState: () => zoneDrawActive,
+      getZoneDeleteState: () => zoneDeleteActive,
+      cancelBuilding,
+      stopBuildingEdit,
+      updateBuildingDraftData: setBuildingDraftData
+  });
   const buildingSelection = createBuildingSelectionController({
       map,
       customBuildings,
@@ -449,6 +512,31 @@ import {
   }
 
   let currentVisibleBuildings = [];
+  const buildingLabelController = createBuildingLabelController({
+      map,
+      state,
+      logPrompt,
+      numToLetters,
+      displayHeight,
+      detectFontStack,
+      getCurrentVisibleBuildings: () => currentVisibleBuildings,
+      getLabeledBuildings: () => labeledBuildings,
+      getHighlightedBuildings: () => highlightedBuildings,
+      getHiddenBuildingKeys: () => hiddenBuildingKeys,
+      getKeyToLetter: () => keyToLetter,
+      getLetterToKey: () => letterToKey,
+      getNextLetterIndex: () => nextLetterIndex,
+      setNextLetterIndex: (v) => { nextLetterIndex = v; },
+      refreshBuildings,
+      maxBuildingLabels: MAX_BUILDING_LABELS
+  });
+  const buildingNavigationController = createBuildingNavigationController({
+      map,
+      lookupBuilding,
+      hiddenBuildingKeys,
+      highlightedBuildings,
+      logPrompt
+  });
 
   let DETECTED_FONT_STACK = null;
   function detectFontStack() {
@@ -724,240 +812,44 @@ import {
   map.on('load', updateInfo);
 
   function updateBuildingLabels() {
-      if (!state.buildingLabels) return;
-      const entries = currentVisibleBuildings.slice();
-      entries.sort((a, b) => {
-          const dy = b.xy[1] - a.xy[1];
-          if (Math.abs(dy) > 1e-5) return dy;
-          return a.xy[0] - b.xy[0];
-      });
-      const trimmed = entries.slice(0, MAX_BUILDING_LABELS);
-      labeledBuildings.clear();
-      const labelFeatures = [];
-      const seenKeys = new Set();
-      for (const e of trimmed) {
-          const existingLetter = keyToLetter.get(e.key);
-          if (existingLetter) {
-              labeledBuildings.set(existingLetter, { ...e, letter: existingLetter });
-              labelFeatures.push({
-                  type: 'Feature',
-                  properties: { letter: existingLetter },
-                  geometry: { type: 'Point', coordinates: e.xy }
-              });
-              seenKeys.add(e.key);
-          }
-      }
-      for (const e of trimmed) {
-          if (seenKeys.has(e.key)) continue;
-          let letter;
-          do { letter = numToLetters(nextLetterIndex++); } while (letterToKey.has(letter));
-          keyToLetter.set(e.key, letter);
-          letterToKey.set(letter, e.key);
-          labeledBuildings.set(letter, { ...e, letter });
-          labelFeatures.push({
-              type: 'Feature',
-              properties: { letter },
-              geometry: { type: 'Point', coordinates: e.xy }
-          });
-      }
-      const data = { type: 'FeatureCollection', features: labelFeatures };
-      if (map.getSource('building-labels-src')) {
-          map.getSource('building-labels-src').setData(data);
-      } else {
-          map.addSource('building-labels-src', { type: 'geojson', data });
-      }
-      if (!map.getLayer('building-labels')) {
-          const fontStack = detectFontStack();
-          map.addLayer({
-              id: 'building-labels',
-              type: 'symbol',
-              source: 'building-labels-src',
-              layout: {
-                  'text-field': ['get', 'letter'],
-                  'text-font': fontStack,
-                  'text-size': ['interpolate', ['linear'], ['zoom'], 15, 11, 18, 18, 19, 22],
-                  'text-allow-overlap': true,
-                  'text-ignore-placement': true,
-                  'text-rotation-alignment': 'viewport',
-                  'text-pitch-alignment': 'viewport'
-              },
-              paint: {
-                  'text-color': '#ffffff',
-                  'text-halo-color': '#0b1220',
-                  'text-halo-width': 2.5,
-                  'text-halo-blur': 0.5
-              }
-          });
-      }
-      map.setLayoutProperty('building-labels', 'visibility',
-          state.buildings ? 'visible' : 'none');
-      dbg(`Labels: ${labelFeatures.length} (of ${entries.length}).`);
+      buildingLabelController.updateBuildingLabels();
   }
 
   function rebuildHighlights() {
-      const features = [];
-      const shadowFeatures = [];
-      for (const h of highlightedBuildings.values()) {
-          features.push({
-              type: 'Feature',
-              properties: { color: h.color, height: displayHeight(h.height), base: h.base },
-              geometry: h.feature.geometry
-          });
-          shadowFeatures.push({
-              type: 'Feature',
-              properties: {},
-              geometry: h.feature.geometry
-          });
-      }
-      const data = { type: 'FeatureCollection', features };
-      if (map.getSource('building-highlights-src')) {
-          map.getSource('building-highlights-src').setData(data);
-      } else if (features.length) {
-          map.addSource('building-highlights-src', { type: 'geojson', data });
-          map.addLayer({
-              id: 'building-highlights',
-              type: 'fill-extrusion',
-              source: 'building-highlights-src',
-              paint: {
-                  'fill-extrusion-color': ['get', 'color'],
-                  'fill-extrusion-height': ['get', 'height'],
-                  'fill-extrusion-base': ['get', 'base'],
-                  'fill-extrusion-opacity': 1,
-                  'fill-extrusion-vertical-gradient': false
-              }
-          });
-      }
-      const shadowSrc = map.getSource('buildings-shadow-src');
-      if (shadowSrc && map.getSource('buildings-live-src')) {
-          const liveData = map.getSource('buildings-live-src')._data || { features: [] };
-          const base = [];
-          for (const f of liveData.features || []) {
-              base.push({ type: 'Feature', properties: {}, geometry: f.geometry });
-          }
-          for (const s of shadowFeatures) base.push(s);
-          shadowSrc.setData({ type: 'FeatureCollection', features: base });
-      }
+      buildingLabelController.rebuildHighlights();
   }
 
   function lookupBuilding(letterRaw) {
-      const letter = String(letterRaw || '').trim().toUpperCase();
-      if (!state.buildingLabels) {
-          logPrompt('error', 'Turn on labels first: "label buildings"');
-          return null;
-      }
-      const entry = labeledBuildings.get(letter);
-      if (!entry) {
-          logPrompt('error', `No building labeled "${letter}" in view.`);
-          return null;
-      }
-      return entry;
+      return buildingLabelController.lookupBuilding(letterRaw);
   }
 
   function highlightBuilding(letterRaw, color) {
-      const entry = lookupBuilding(letterRaw);
-      if (!entry) return;
-      highlightedBuildings.set(entry.key, {
-          letter: entry.letter,
-          color: color || '#ff2d2d',
-          feature: entry.feature,
-          height: entry.height,
-          base: entry.base
-      });
-      rebuildHighlights();
-      refreshBuildings();
-      logPrompt('bot', `Building ${entry.letter} highlighted.`);
+      buildingLabelController.highlightBuilding(letterRaw, color);
   }
   function unhighlightBuilding(letterRaw) {
-      const entry = lookupBuilding(letterRaw);
-      if (!entry) return;
-      if (highlightedBuildings.delete(entry.key)) {
-          rebuildHighlights();
-          refreshBuildings();
-          logPrompt('bot', `Highlight removed from ${entry.letter}.`);
-      } else {
-          logPrompt('info', `Building ${entry.letter} wasn't highlighted.`);
-      }
+      buildingLabelController.unhighlightBuilding(letterRaw);
   }
   function clearHighlights() {
-      highlightedBuildings.clear();
-      if (map.getLayer('building-highlights')) map.removeLayer('building-highlights');
-      if (map.getSource('building-highlights-src')) map.removeSource('building-highlights-src');
-      refreshBuildings();
-      logPrompt('bot', 'All highlights cleared.');
+      buildingLabelController.clearHighlights();
   }
 
   function hideBuildingByLetter(letterRaw) {
-      const entry = lookupBuilding(letterRaw);
-      if (!entry) return;
-      hiddenBuildingKeys.add(entry.key);
-      highlightedBuildings.delete(entry.key);
-      rebuildHighlights();
-      refreshBuildings();
-      updateBuildingLabels();
-      logPrompt('bot', `Building ${entry.letter} hidden.`);
+      buildingLabelController.hideBuildingByLetter(letterRaw);
   }
   function showBuildingByLetter(letterRaw) {
-      const letter = String(letterRaw || '').trim().toUpperCase();
-      const keyToShow = letterToKey.get(letter);
-      if (!keyToShow) {
-          logPrompt('error', `No building is currently assigned letter "${letter}".`);
-          return;
-      }
-      if (!hiddenBuildingKeys.has(keyToShow)) {
-          logPrompt('info', `Building ${letter} is already visible.`);
-          return;
-      }
-      hiddenBuildingKeys.delete(keyToShow);
-      refreshBuildings();
-      updateBuildingLabels();
-      logPrompt('bot', `Building ${letter} shown again.`);
+      buildingLabelController.showBuildingByLetter(letterRaw);
   }
   function listHidden() {
-      if (!hiddenBuildingKeys.size) { logPrompt('info', 'Nothing hidden.'); return; }
-      logPrompt('info', `Hidden buildings: ${hiddenBuildingKeys.size}`);
-      for (const k of hiddenBuildingKeys) {
-          logPrompt('info', `  ${keyToLetter.get(k) || '?'}  ${k}`);
-      }
+      buildingLabelController.listHidden();
   }
   function clearHidden() {
-      if (!hiddenBuildingKeys.size) { logPrompt('info', 'Nothing hidden.'); return; }
-      const n = hiddenBuildingKeys.size;
-      hiddenBuildingKeys.clear();
-      refreshBuildings();
-      updateBuildingLabels();
-      logPrompt('bot', `${n} hidden building(s) restored.`);
+      buildingLabelController.clearHidden();
   }
   function focusBuilding(letterRaw) {
-      const entry = lookupBuilding(letterRaw);
-      if (!entry) return;
-      const [lon, lat] = entry.xy;
-      map.easeTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 18.5), duration: 900 });
-      logPrompt('bot', `Flying to ${entry.letter} at ${lat.toFixed(5)}, ${lon.toFixed(5)}.`);
+      buildingNavigationController.focusBuilding(letterRaw);
   }
   function infoAboutBuilding(letterRaw) {
-      const entry = lookupBuilding(letterRaw);
-      if (!entry) return;
-      const [lon, lat] = entry.xy;
-      const f = entry.feature;
-      const cosLat = Math.cos(lat * Math.PI / 180);
-      const mLon = 111320 * cosLat, mLat = 111320;
-      let coords = f.geometry.type === 'Polygon' ? f.geometry.coordinates[0]
-                 : f.geometry.coordinates[0][0];
-      let area2 = 0;
-      for (let i = 0; i < coords.length - 1; i++) {
-          const [x1, y1] = coords[i], [x2, y2] = coords[i+1];
-          area2 += (x1 * mLon) * (y2 * mLat) - (x2 * mLon) * (y1 * mLat);
-      }
-      const areaM2 = Math.abs(area2) / 2;
-      const osmLine = entry.osmId != null ? `  osm_id: ${entry.osmId}` : `  osm_id: (custom or synthetic)`;
-      logPrompt('info', `Building ${entry.letter}`);
-      logPrompt('info', `  syn_id: ${entry.key}`);
-      logPrompt('info', osmLine);
-      logPrompt('info', `  center: ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-      logPrompt('info', `  height: ${entry.height} m  (base ${entry.base} m)`);
-      logPrompt('info', `  area:   ${Math.round(areaM2)} m²`);
-      logPrompt('info', `  hidden: ${hiddenBuildingKeys.has(entry.key) ? 'yes' : 'no'}`);
-      logPrompt('info', `  highlighted: ${highlightedBuildings.has(entry.key) ? 'yes' : 'no'}`);
+      buildingNavigationController.infoAboutBuilding(letterRaw);
   }
 
   const weather = createWeatherController({
@@ -1034,6 +926,49 @@ import {
   }
 
   const roadLayerController = createRoadLayerController({ map, dbg });
+  const roadLifecycle = createRoadLifecycleController({
+      map,
+      dbg,
+      getRoadDrawActive: () => roadDrawActive,
+      setRoadDrawActive: (v) => { roadDrawActive = v; },
+      getRoadDeleteActive: () => roadDeleteActive,
+      setRoadDeleteActive: (v) => { roadDeleteActive = v; },
+      getDraftCoords: () => draftCoords,
+      setDraftCoords: (v) => { draftCoords = v; },
+      getDraftCursor: () => draftCursor,
+      setDraftCursor: (v) => { draftCursor = v; },
+      getDrawnRoads: () => drawnRoads,
+      setDrawnRoads: (v) => { drawnRoads = v; },
+      getHoveredDeleteRoadId: () => hoveredDeleteRoadId,
+      setHoveredDeleteRoadId: (v) => { hoveredDeleteRoadId = v; },
+      getRoadIdCounter: () => roadIdCounter,
+      setRoadIdCounter: (v) => { roadIdCounter = v; },
+      getRoadDrawColor: () => roadDrawColor,
+      setRoadDrawColor: (v) => { roadDrawColor = v; },
+      getRoadDrawWidth: () => roadDrawWidth,
+      setRoadDrawWidth: (v) => { roadDrawWidth = v; },
+      createRoadLayers,
+      positionRoadLayers,
+      refreshDrawnRoads,
+      setDraftData,
+      clearDeleteHover,
+      updateRoadDrawButton,
+      updateRoadDeleteButton,
+      getTilePickerActive: () => tilePickerActive,
+      setTilePickerActive,
+      getBuildingDrawActive: () => buildingDrawActive,
+      cancelBuilding,
+      getBuildingEditActive: () => buildingEditActive,
+      stopBuildingEdit,
+      getBuildingDeleteActive: () => buildingDeleteActive,
+      setBuildingDeleteActive,
+      getZoneDrawActive: () => zoneDrawActive,
+      cancelZone,
+      getZoneDeleteActive: () => zoneDeleteActive,
+      setZoneDeleteActive,
+      logPrompt,
+      resolveColor
+  });
 
   const ROAD_LAYER_IDS = roadLayerController.ROAD_LAYER_IDS;
 
@@ -1091,197 +1026,60 @@ import {
   }
 
   function setDraftData() {
-      const lineSrc = map.getSource('road-draft-src');
-      if (lineSrc) {
-          const coords = draftCoords.slice();
-          if (roadDrawActive && draftCursor && coords.length) coords.push(draftCursor);
-          lineSrc.setData({
-              type: 'FeatureCollection',
-              features: coords.length >= 2 ? [{
-                  type: 'Feature',
-                  properties: {},
-                  geometry: { type: 'LineString', coordinates: coords }
-              }] : []
-          });
-      }
-      const ptSrc = map.getSource('road-draft-points-src');
-      if (ptSrc) {
-          ptSrc.setData({
-              type: 'FeatureCollection',
-              features: draftCoords.map(c => ({
-                  type: 'Feature',
-                  properties: {},
-                  geometry: { type: 'Point', coordinates: c }
-              }))
-          });
-      }
-      updateRoadDrawButton();
+      roadLifecycle.setDraftData();
   }
 
   function setDeleteHover(road) {
-      if (!road) { clearDeleteHover(); return; }
-      hoveredDeleteRoadId = road.id;
-      const src = map.getSource('road-delete-hover-src');
-      if (src) {
-          src.setData({
-              type: 'FeatureCollection',
-              features: [{
-                  type: 'Feature',
-                  properties: {},
-                  geometry: { type: 'LineString', coordinates: road.coords }
-              }]
-          });
-      }
+      roadLifecycle.setDeleteHover(road);
   }
   function clearDeleteHover() {
-      hoveredDeleteRoadId = null;
-      const src = map.getSource('road-delete-hover-src');
-      if (src) src.setData({ type: 'FeatureCollection', features: [] });
+      roadLifecycle.clearDeleteHover();
   }
 
   function setRoadDrawActive(active) {
-      if (active) {
-          if (tilePickerActive) setTilePickerActive(false);
-          if (roadDeleteActive) setRoadDeleteActive(false);
-          if (buildingDrawActive) cancelBuilding();
-          if (buildingEditActive) stopBuildingEdit();
-          if (buildingDeleteActive) setBuildingDeleteActive(false);
-          if (zoneDrawActive) cancelZone();
-          if (zoneDeleteActive) setZoneDeleteActive(false);
-      }
-      roadDrawActive = active;
-      if (active) {
-          if (!map.getLayer('drawn-roads')) createRoadLayers();
-          else positionRoadLayers();
-          map.doubleClickZoom.disable();
-          map.getCanvas().style.cursor = 'crosshair';
-      } else {
-          map.doubleClickZoom.enable();
-          if (!roadDeleteActive) map.getCanvas().style.cursor = '';
-          draftCursor = null;
-      }
-      updateRoadDrawButton();
-      setDraftData();
+      roadLifecycle.setRoadDrawState(active);
   }
 
   function setRoadDeleteActive(active) {
-      if (active) {
-          if (tilePickerActive) setTilePickerActive(false);
-          if (roadDrawActive) cancelRoad();
-          if (buildingDrawActive) cancelBuilding();
-          if (buildingEditActive) stopBuildingEdit();
-          if (buildingDeleteActive) setBuildingDeleteActive(false);
-          if (zoneDrawActive) cancelZone();
-          if (zoneDeleteActive) setZoneDeleteActive(false);
-      }
-      roadDeleteActive = active;
-      if (active) {
-          if (!map.getLayer('drawn-roads')) createRoadLayers();
-          else positionRoadLayers();
-          map.getCanvas().style.cursor = 'crosshair';
-          if (!drawnRoads.size) logPrompt('info', 'No drawn roads to delete yet.');
-      } else {
-          clearDeleteHover();
-          map.getCanvas().style.cursor = '';
-      }
-      updateRoadDeleteButton();
+      roadLifecycle.setRoadDeleteState(active);
   }
 
   function startRoadDrawing() {
-      if (roadDrawActive) return logPrompt('info', 'Already drawing.');
-      draftCoords = [];
-      draftCursor = null;
-      setRoadDrawActive(true);
-      logPrompt('bot', `Road drawing ON — color #ff0000, width ${roadDrawWidth} m.`);
+      roadLifecycle.startRoadDrawing();
   }
   function startRoadDeleting() {
-      if (roadDeleteActive) { setRoadDeleteActive(false); return logPrompt('info', 'Road deletion OFF.'); }
-      setRoadDeleteActive(true);
-      logPrompt('bot', 'Road deletion ON — hover a road and click to delete it.');
+      roadLifecycle.startRoadDeleting();
   }
 
   function finishRoad() {
-      if (!roadDrawActive) return logPrompt('info', 'Not drawing.');
-      if (draftCoords.length < 2) {
-          logPrompt('error', 'A road needs at least 2 points — cancelled.');
-          return cancelRoad();
-      }
-      const id = `road-${++roadIdCounter}`;
-      const n = draftCoords.length;
-      drawnRoads.set(id, { id, coords: draftCoords.slice(), color: '#ff0000', width: roadDrawWidth });
-      draftCoords = [];
-      draftCursor = null;
-      setRoadDrawActive(false);
-      refreshDrawnRoads();
-      setDraftData();
-      positionRoadLayers();
-      logPrompt('bot', `Added ${id} (${n} points).`);
+      roadLifecycle.finishRoad();
   }
   function cancelRoad() {
-      if (!roadDrawActive && !draftCoords.length) return logPrompt('info', 'Not drawing.');
-      draftCoords = [];
-      draftCursor = null;
-      setRoadDrawActive(false);
-      setDraftData();
-      logPrompt('bot', 'Road drawing cancelled.');
+      roadLifecycle.cancelRoad();
   }
   function addDraftPoint(lon, lat) {
-      draftCoords.push([lon, lat]);
-      draftCursor = [lon, lat];
-      setDraftData();
+      roadLifecycle.addDraftPoint(lon, lat);
   }
   function undoDraftPoint() {
-      if (!roadDrawActive) return logPrompt('info', 'Not drawing.');
-      if (!draftCoords.length) return logPrompt('info', 'No points to undo.');
-      draftCoords.pop();
-      setDraftData();
-      logPrompt('info', `Point removed — ${draftCoords.length} left.`);
+      roadLifecycle.undoDraftPoint();
   }
   function clearAllRoads() {
-      if (!drawnRoads.size) return logPrompt('info', 'No drawn roads.');
-      const n = drawnRoads.size;
-      drawnRoads.clear();
-      clearDeleteHover();
-      refreshDrawnRoads();
-      logPrompt('bot', `${n} drawn road(s) removed.`);
+      roadLifecycle.clearAllRoads();
   }
   function listRoads() {
-      if (!drawnRoads.size) return logPrompt('info', 'No drawn roads yet.');
-      logPrompt('info', `Drawn roads: ${drawnRoads.size}`);
-      for (const r of drawnRoads.values()) {
-          const [lon, lat] = r.coords[0];
-          logPrompt('info', `  ${r.id}  ${r.coords.length} pts  ${r.color}  w=${r.width}m  start ${lat.toFixed(5)},${lon.toFixed(5)}`);
-      }
+      roadLifecycle.listRoads();
   }
   function deleteRoadById(id) {
-      if (!drawnRoads.has(id)) return false;
-      drawnRoads.delete(id);
-      if (hoveredDeleteRoadId === id) clearDeleteHover();
-      refreshDrawnRoads();
-      return true;
+      return roadLifecycle.deleteRoadById(id);
   }
   function findRoadAtPoint(point) {
-      if (!map.getLayer('drawn-roads')) return null;
-      let hits;
-      try { hits = map.queryRenderedFeatures(point, { layers: ['drawn-roads'] }); }
-      catch (e) { return null; }
-      if (!hits || !hits.length) return null;
-      for (const h of hits) {
-          const id = h.properties && h.properties.id;
-          if (id && drawnRoads.has(id)) return drawnRoads.get(id);
-      }
-      return null;
+      return roadLifecycle.findRoadAtPoint(point);
   }
   function setRoadColor(name) {
-      const c = resolveColor(name);
-      if (!c) return logPrompt('error', `Unknown color: "${name}"`);
-      roadDrawColor = c;
-      logPrompt('bot', `Draft colour set to ${c}.`);
+      roadLifecycle.setRoadColor(name);
   }
   function setRoadWidth(n) {
-      const v = Math.max(0.5, Math.min(60, n));
-      roadDrawWidth = v;
-      logPrompt('bot', `Road width set to ${v} m.`);
+      roadLifecycle.setRoadWidth(n);
   }
 
   const BUILDING_OVERLAY_LAYER_IDS = buildingEditor.BUILDING_OVERLAY_LAYER_IDS;
@@ -1304,32 +1102,7 @@ import {
   }
 
   function setBuildingDraftData() {
-      const fillSrc = map.getSource('building-draft-fill-src');
-      if (fillSrc) {
-          const closed = buildingDraftCoords.length >= 3 ? [[...buildingDraftCoords, buildingDraftCoords[0]]] : [];
-          fillSrc.setData({
-              type: 'FeatureCollection',
-              features: closed.length ? [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: closed } }] : []
-          });
-      }
-      const lineSrc = map.getSource('building-draft-line-src');
-      if (lineSrc) {
-          const coords = buildingDraftCoords.slice();
-          if (buildingDrawActive && !pendingBuilding && buildingDraftCursor && coords.length) coords.push(buildingDraftCursor);
-          if (buildingDrawActive && coords.length >= 3) coords.push(coords[0]);
-          lineSrc.setData({
-              type: 'FeatureCollection',
-              features: coords.length >= 2 ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }] : []
-          });
-      }
-      const ptSrc = map.getSource('building-draft-points-src');
-      if (ptSrc) {
-          ptSrc.setData({
-              type: 'FeatureCollection',
-              features: buildingDraftCoords.map(c => ({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } }))
-          });
-      }
-      updateBuildingBuildButton();
+      buildingLifecycle.setBuildingDraftData();
   }
 
   function updateSelectionOverlay() {
@@ -1376,68 +1149,25 @@ import {
   }
 
   function showHeightPanel(defaultHeight) {
-      const panel = document.getElementById('height-panel');
-      const input = document.getElementById('height-input');
-      if (!panel || !input) return;
-      input.value = String(defaultHeight);
-      panel.classList.remove('hidden');
-      map.dragPan.disable();
-      map.scrollZoom.disable();
-      map.dragRotate.disable();
-      map.boxZoom.disable();
-      setTimeout(() => { input.focus(); input.select(); }, 0);
+      buildingLifecycle.showHeightPanel(defaultHeight);
   }
   function hideHeightPanel() {
-      const panel = document.getElementById('height-panel');
-      if (panel) panel.classList.add('hidden');
-      const input = document.getElementById('height-input');
-      if (input) input.blur();
-      map.dragPan.enable();
-      map.scrollZoom.enable();
-      map.dragRotate.enable();
-      map.boxZoom.enable();
+      buildingLifecycle.hideHeightPanel();
   }
   function focusHeightInput() {
-      const input = document.getElementById('height-input');
-      if (input) { input.focus(); input.select(); }
+      buildingLifecycle.focusHeightInput();
   }
   function readHeightInput() {
-      const input = document.getElementById('height-input');
-      if (!input) return buildingDefaultHeight;
-      const v = parseFloat(input.value);
-      if (!Number.isFinite(v) || v <= 0) return buildingDefaultHeight;
-      return Math.min(500, Math.max(1, v));
+      return buildingLifecycle.readHeightInput();
   }
 
   function commitPendingBuilding(height) {
-      if (!pendingBuilding) return;
-      const n = pendingBuilding.coords.length;
       const id = `custom-${++buildingIdCounter}`;
-      customBuildings.set(id, {
-          id, coords: pendingBuilding.coords, height, base: 0, color: buildingDefaultColor
-      });
-      pendingBuilding = null;
-      buildingDraftCoords = [];
-      buildingDraftCursor = null;
-      hideHeightPanel();
-      setBuildingDrawActive(false);
-      refreshBuildings();
-      if (state.buildingLabels) updateBuildingLabels();
-      saveCustomBuildings();
-      buildingDefaultHeight = height;
-      logPrompt('bot', `Added building ${id} (${n} vertices, ${height} m).`);
-      selectedBuildingId = id;
-      updateSelectionOverlay();
-      updateBuildingEditButton();
+      console.warn('Deprecated commitPendingBuilding path; controller handles commit.', { id, height });
+      buildingLifecycle.commitPendingBuilding();
   }
   function cancelPendingBuilding() {
-      if (!pendingBuilding) return;
-      pendingBuilding = null;
-      buildingDraftCoords = [];
-      buildingDraftCursor = null;
-      hideHeightPanel();
-      setBuildingDrawActive(false);
-      logPrompt('bot', 'Building creation cancelled.');
+      buildingLifecycle.cancelPendingBuilding();
   }
 
   function updateBuildingBuildButton() {
@@ -1514,82 +1244,28 @@ import {
   }
 
   function startBuildingDrawing() {
-      if (pendingBuilding) { focusHeightInput(); return; }
-      if (buildingDrawActive) return logPrompt('info', 'Already drawing.');
-      buildingDraftCoords = [];
-      buildingDraftCursor = null;
-      setBuildingDrawActive(true);
-      logPrompt('bot', `Building drawing ON — default ${buildingDefaultHeight} m.`);
-      logPrompt('info', 'Click map to add vertices · Enter/first-vertex to finish · Esc cancel.');
+      buildingLifecycle.startBuildingDrawing();
   }
   function startBuildingDeleting() {
-      if (buildingDeleteActive) { setBuildingDeleteActive(false); return logPrompt('info', 'Building deletion OFF.'); }
-      setBuildingDeleteActive(true);
-      logPrompt('bot', 'Building deletion ON.');
+      buildingLifecycle.startBuildingDeleting();
   }
   function addBuildingVertex(lon, lat) {
-      if (buildingDraftCoords.length) {
-          const [lastLon, lastLat] = buildingDraftCoords[buildingDraftCoords.length - 1];
-          const d = Math.hypot(lon - lastLon, lat - lastLat);
-          if (d < 1e-6) return;
-      }
-      buildingDraftCoords.push([lon, lat]);
-      buildingDraftCursor = [lon, lat];
-      setBuildingDraftData();
+      buildingLifecycle.addBuildingVertex(lon, lat);
   }
   function undoBuildingVertex() {
-      if (!buildingDrawActive) return logPrompt('info', 'Not building.');
-      if (!buildingDraftCoords.length) return logPrompt('info', 'No vertices to undo.');
-      buildingDraftCoords.pop();
-      setBuildingDraftData();
-      logPrompt('info', `Vertex removed — ${buildingDraftCoords.length} left.`);
+      buildingLifecycle.undoBuildingVertex();
   }
   function finishBuilding() {
-      if (!buildingDrawActive) return logPrompt('info', 'Not building.');
-      if (pendingBuilding) { focusHeightInput(); return; }
-      if (buildingDraftCoords.length < 3) {
-          logPrompt('error', 'A building needs at least 3 vertices — cancelled.');
-          return cancelBuilding();
-      }
-      pendingBuilding = { coords: buildingDraftCoords.slice() };
-      buildingDraftCursor = null;
-      showHeightPanel(buildingDefaultHeight);
-      setBuildingDraftData();
+      buildingLifecycle.finishBuilding();
   }
   function cancelBuilding() {
-      if (pendingBuilding) return cancelPendingBuilding();
-      if (!buildingDrawActive && !buildingDraftCoords.length) return logPrompt('info', 'Not building.');
-      buildingDraftCoords = [];
-      buildingDraftCursor = null;
-      setBuildingDrawActive(false);
-      setBuildingDraftData();
-      logPrompt('bot', 'Building drawing cancelled.');
+      buildingLifecycle.cancelBuilding();
   }
   function startBuildingEdit() {
-      if (buildingEditActive) return logPrompt('info', 'Already editing.');
-      if (pendingBuilding) cancelPendingBuilding();
-      if (tilePickerActive) setTilePickerActive(false);
-      if (roadDrawActive) cancelRoad();
-      if (roadDeleteActive) setRoadDeleteActive(false);
-      if (buildingDrawActive) cancelBuilding();
-      if (buildingDeleteActive) setBuildingDeleteActive(false);
-      if (zoneDrawActive) cancelZone();
-      if (zoneDeleteActive) setZoneDeleteActive(false);
-      buildingEditActive = true;
-      createBuildingEditorLayers();
-      updateBuildingEditButton();
-      logPrompt('bot', 'Building edit ON.');
+      buildingLifecycle.startBuildingEdit();
   }
   function stopBuildingEdit() {
-      if (!buildingEditActive) return logPrompt('info', 'Not editing.');
-      buildingEditActive = false;
-      selectedBuildingId = null;
-      buildingDragState = null;
-      updateSelectionOverlay();
-      updateBuildingEditButton();
-      map.getCanvas().style.cursor = '';
-      saveCustomBuildings();
-      logPrompt('bot', 'Building edit OFF.');
+      buildingLifecycle.stopBuildingEdit();
   }
   function selectBuilding(id) {
       buildingSelection.selectBuilding(id);
@@ -1598,66 +1274,19 @@ import {
       buildingSelection.deselectBuilding();
   }
   function deleteSelectedBuilding() {
-      if (!selectedBuildingId) return logPrompt('info', 'No building selected.');
-      const id = selectedBuildingId;
-      if (!customBuildings.has(id)) return logPrompt('error', 'Selected building no longer exists.');
-      customBuildings.delete(id);
-      selectedBuildingId = null;
-      updateSelectionOverlay();
-      refreshBuildings();
-      if (state.buildingLabels) updateBuildingLabels();
-      saveCustomBuildings();
-      logPrompt('bot', `Deleted ${id}.`);
+      buildingLifecycle.deleteSelectedBuilding();
   }
   function clearAllCustomBuildings() {
-      if (!customBuildings.size) return logPrompt('info', 'No custom buildings.');
-      const n = customBuildings.size;
-      customBuildings.clear();
-      selectedBuildingId = null;
-      updateSelectionOverlay();
-      refreshBuildings();
-      if (state.buildingLabels) updateBuildingLabels();
-      saveCustomBuildings();
-      logPrompt('bot', `${n} custom building(s) removed.`);
+      buildingLifecycle.clearAllCustomBuildings();
   }
   function listCustomBuildings() {
-      if (!customBuildings.size) return logPrompt('info', 'No custom buildings yet.');
-      logPrompt('info', `Custom buildings: ${customBuildings.size}`);
-      for (const b of customBuildings.values()) {
-          const [lon, lat] = centerOfCoordinates(b.coords);
-          logPrompt('info', `  ${b.id}  ${b.coords.length} vtx  h=${b.height}m  ${b.color}  @ ${lat.toFixed(5)},${lon.toFixed(5)}`);
-      }
+      buildingLifecycle.listCustomBuildings();
   }
   function setBuildingHeight(n) {
-      const v = Math.max(1, Math.min(500, n));
-      if (pendingBuilding) {
-          const input = document.getElementById('height-input');
-          if (input) input.value = String(v);
-          return logPrompt('bot', `Height prompt updated to ${v} m.`);
-      }
-      if (selectedBuildingId && customBuildings.has(selectedBuildingId)) {
-          customBuildings.get(selectedBuildingId).height = v;
-          refreshBuildings();
-          saveCustomBuildings();
-          logPrompt('bot', `Height of ${selectedBuildingId} set to ${v} m.`);
-      } else {
-          buildingDefaultHeight = v;
-          logPrompt('bot', `Default height for new buildings set to ${v} m.`);
-      }
+      buildingLifecycle.setBuildingHeight(n);
   }
   function setBuildingColor(name) {
-      const c = resolveColor(name);
-      if (!c) return logPrompt('error', `Unknown color: "${name}"`);
-      if (selectedBuildingId && customBuildings.has(selectedBuildingId)) {
-          customBuildings.get(selectedBuildingId).color = c;
-          refreshBuildings();
-          saveCustomBuildings();
-          logPrompt('bot', `Color of ${selectedBuildingId} set to ${c}.`);
-      } else {
-          buildingDefaultColor = c;
-          if (map.getLayer('building-draft-fill')) map.setPaintProperty('building-draft-fill', 'fill-color', c);
-          logPrompt('bot', `Default color for new buildings set to ${c}.`);
-      }
+      buildingLifecycle.setBuildingColor(name);
   }
   function tryStartBuildingDrag(e) {
       return buildingInteraction.tryStartBuildingDrag(e, { buildingEditActive, selectedBuildingId, selected: selectedBuildingId ? customBuildings.get(selectedBuildingId) : null });
@@ -1669,316 +1298,156 @@ import {
       buildingInteraction.endBuildingDrag();
   }
 
-  const ZONE_TOP_LAYER_IDS = ['zone-labels','zone-draft-outline','zone-draft-fill','zone-delete-hover-outline','zone-delete-hover-fill'];
+  const zoneController = createZoneController({
+      map,
+      dbg,
+      detectFontStack,
+      haversineMeters,
+      zoneCircleCoords,
+      ZONE_CLASSES,
+      getZones: () => zones,
+      getZoneIdCounter: () => zoneIdCounter,
+      setZoneIdCounter: (v) => { zoneIdCounter = v; },
+      getZoneDrawActive: () => zoneDrawActive,
+      setZoneDrawActive: (v) => { zoneDrawActive = v; },
+      getZoneDraftCenter: () => zoneDraftCenter,
+      setZoneDraftCenter: (v) => { zoneDraftCenter = v; },
+      getZoneDraftRadiusM: () => zoneDraftRadiusM,
+      setZoneDraftRadiusM: (v) => { zoneDraftRadiusM = v; },
+      getZoneDeleteActive: () => zoneDeleteActive,
+      setZoneDeleteActive: (v) => { zoneDeleteActive = v; },
+      getHoveredDeleteZoneId: () => hoveredDeleteZoneId,
+      setHoveredDeleteZoneId: (v) => { hoveredDeleteZoneId = v; },
+      getPendingZone: () => pendingZone,
+      setPendingZone: (v) => { pendingZone = v; },
+      getZoneDefaultClass: () => zoneDefaultClass,
+      setZoneDefaultClass: (v) => { zoneDefaultClass = v; },
+      saveZones: () => saveZones(),
+      loadZones: () => loadZones(),
+      zoneStorageKey: ZONE_STORAGE_KEY
+  });
+
+  const ZONE_TOP_LAYER_IDS = zoneController.ZONE_TOP_LAYER_IDS;
 
   function createZoneLayers() {
-      if (!map.getSource('zones-src')) map.addSource('zones-src', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-      if (!map.getSource('zone-labels-src')) map.addSource('zone-labels-src', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-      if (!map.getSource('zone-draft-src')) map.addSource('zone-draft-src', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-      if (!map.getSource('zone-delete-hover-src')) map.addSource('zone-delete-hover-src', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-      const colorExpr = ['match', ['get', 'class'], 'Flood', '#2563eb', 'Green', '#16a34a', 'Shade', '#6b7280', '#888888'];
-      const before = map.getLayer('buildings-shadow') ? 'buildings-shadow' : (map.getLayer('buildings-live') ? 'buildings-live' : undefined);
-      if (!map.getLayer('zones-fill')) map.addLayer({ id: 'zones-fill', type: 'fill', source: 'zones-src', paint: { 'fill-color': colorExpr, 'fill-opacity': 0.4 } }, before);
-      if (!map.getLayer('zones-outline')) map.addLayer({ id: 'zones-outline', type: 'line', source: 'zones-src', paint: { 'line-color': colorExpr, 'line-opacity': 1.0, 'line-width': 3 } }, before);
-      if (!map.getLayer('zone-draft-fill')) map.addLayer({ id: 'zone-draft-fill', type: 'fill', source: 'zone-draft-src', paint: { 'fill-color': ['match', ['get', 'class'], 'Flood', '#2563eb', 'Green', '#16a34a', 'Shade', '#6b7280', '#0ea5e9'], 'fill-opacity': 0.4 } });
-      if (!map.getLayer('zone-draft-outline')) map.addLayer({ id: 'zone-draft-outline', type: 'line', source: 'zone-draft-src', paint: { 'line-color': ['match', ['get', 'class'], 'Flood', '#2563eb', 'Green', '#16a34a', 'Shade', '#6b7280', '#0ea5e9'], 'line-opacity': 1.0, 'line-width': 2.5, 'line-dasharray': [3, 2] } });
-      if (!map.getLayer('zone-delete-hover-fill')) map.addLayer({ id: 'zone-delete-hover-fill', type: 'fill', source: 'zone-delete-hover-src', paint: { 'fill-color': '#dc2626', 'fill-opacity': 0.5 } });
-      if (!map.getLayer('zone-delete-hover-outline')) map.addLayer({ id: 'zone-delete-hover-outline', type: 'line', source: 'zone-delete-hover-src', paint: { 'line-color': '#ef4444', 'line-width': 3, 'line-opacity': 1 } });
-      if (!map.getLayer('zone-labels')) {
-          const fontStack = detectFontStack();
-          map.addLayer({
-              id: 'zone-labels', type: 'symbol', source: 'zone-labels-src',
-              layout: {
-                  'text-field': ['get', 'label'], 'text-font': fontStack,
-                  'text-size': ['interpolate', ['linear'], ['zoom'], 15, 12, 18, 16, 19, 20],
-                  'text-allow-overlap': true, 'text-ignore-placement': true,
-                  'text-rotation-alignment': 'viewport', 'text-pitch-alignment': 'viewport'
-              },
-              paint: { 'text-color': '#ffffff', 'text-halo-color': '#0b1220', 'text-halo-width': 2.5, 'text-halo-blur': 0.5 }
-          });
-      }
-      refreshZones();
-      bringZoneTopLayersToTop();
+      zoneController.createZoneLayers();
   }
 
   function bringZoneTopLayersToTop() {
-      for (let i = ZONE_TOP_LAYER_IDS.length - 1; i >= 0; i--) {
-          const id = ZONE_TOP_LAYER_IDS[i];
-          if (map.getLayer(id)) map.moveLayer(id);
-      }
+      zoneController.bringZoneTopLayersToTop();
   }
 
-  let zoneTopPosScheduled = false;
   function scheduleBringZoneTopLayersToTop() {
-      if (zoneTopPosScheduled) return;
-      zoneTopPosScheduled = true;
-      requestAnimationFrame(() => { zoneTopPosScheduled = false; bringZoneTopLayersToTop(); });
+      zoneController.scheduleBringZoneTopLayersToTop();
   }
 
   function refreshZones() {
-      const features = [];
-      const labelFeatures = [];
-      for (const zone of zones.values()) {
-          const coords = zoneCircleCoords(zone.center, zone.radiusMeters, 64);
-          features.push({ type: 'Feature', properties: { id: zone.id, class: zone.class }, geometry: { type: 'Polygon', coordinates: [coords] } });
-          labelFeatures.push({ type: 'Feature', properties: { id: zone.id, label: zone.id }, geometry: { type: 'Point', coordinates: zone.center } });
-      }
-      const src = map.getSource('zones-src');
-      if (src) src.setData({ type: 'FeatureCollection', features });
-      const labelSrc = map.getSource('zone-labels-src');
-      if (labelSrc) labelSrc.setData({ type: 'FeatureCollection', features: labelFeatures });
+      zoneController.refreshZones();
       updateZoneDrawButton();
       updateZoneDeleteButton();
       if (hoveredDeleteZoneId && !zones.has(hoveredDeleteZoneId)) clearZoneDeleteHover();
   }
 
   function updateZoneDraftPreview() {
-      const src = map.getSource('zone-draft-src');
-      if (!src) return;
-      if (!zoneDrawActive || !zoneDraftCenter) {
-          src.setData({ type: 'FeatureCollection', features: [] });
-          return;
-      }
-      const radius = zoneDraftRadiusM > 0 ? zoneDraftRadiusM : 1;
-      const coords = zoneCircleCoords(zoneDraftCenter, radius, 64);
-      src.setData({
-          type: 'FeatureCollection',
-          features: [{ type: 'Feature', properties: { class: zoneDefaultClass }, geometry: { type: 'Polygon', coordinates: [coords] } }]
-      });
+      zoneController.updateZoneDraftPreview();
   }
 
   function setZoneDeleteHover(zone) {
-      if (!zone) { clearZoneDeleteHover(); return; }
-      hoveredDeleteZoneId = zone.id;
-      const src = map.getSource('zone-delete-hover-src');
-      if (!src) return;
-      const coords = zoneCircleCoords(zone.center, zone.radiusMeters, 64);
-      src.setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [coords] } }] });
+      zoneController.setZoneDeleteHover(zone);
   }
   function clearZoneDeleteHover() {
-      hoveredDeleteZoneId = null;
-      const src = map.getSource('zone-delete-hover-src');
-      if (src) src.setData({ type: 'FeatureCollection', features: [] });
+      zoneController.clearZoneDeleteHover();
   }
   function findZoneAtPoint(point) {
-      if (!map.getLayer('zones-fill')) return null;
-      let hits;
-      try { hits = map.queryRenderedFeatures(point, { layers: ['zones-fill'] }); }
-      catch (e) { return null; }
-      if (!hits || !hits.length) return null;
-      for (const h of hits) {
-          const id = h.properties && h.properties.id;
-          if (id && zones.has(id)) return zones.get(id);
-      }
-      return null;
+      return zoneController.findZoneAtPoint(point);
   }
 
   function updateZoneDrawButton() {
-      const btn = document.getElementById('zone-draw-btn');
-      if (!btn) return;
-      if (pendingZone) { btn.textContent = `⏳ Choose class…`; btn.classList.add('active'); return; }
-      if (zoneDrawActive) btn.textContent = zoneDraftCenter ? `✅ Set radius` : `⭕ Click center`;
-      else btn.textContent = zones.size ? `⭕ Draw zone (${zones.size})` : '⭕ Draw zone';
-      btn.classList.toggle('active', zoneDrawActive);
+      zoneController.updateZoneDrawButton();
   }
   function updateZoneDeleteButton() {
-      const btn = document.getElementById('zone-delete-btn');
-      if (!btn) return;
-      if (zoneDeleteActive) btn.textContent = zones.size ? `🗑️ Stop deleting (${zones.size})` : '🗑️ Stop deleting';
-      else btn.textContent = zones.size ? `🗑️ Delete zone (${zones.size})` : '🗑️ Delete zone';
-      btn.classList.toggle('active', zoneDeleteActive);
+      zoneController.updateZoneDeleteButton();
   }
 
   function setZoneDrawActive(active) {
-      if (active) {
-          if (tilePickerActive) setTilePickerActive(false);
-          if (roadDrawActive) cancelRoad();
-          if (roadDeleteActive) setRoadDeleteActive(false);
-          if (buildingDrawActive) cancelBuilding();
-          if (buildingEditActive) stopBuildingEdit();
-          if (buildingDeleteActive) setBuildingDeleteActive(false);
-          if (zoneDeleteActive) setZoneDeleteActive(false);
-      }
-      zoneDrawActive = active;
-      if (active) { createZoneLayers(); map.getCanvas().style.cursor = 'crosshair'; }
-      else {
-          map.getCanvas().style.cursor = '';
-          zoneDraftCenter = null;
-          zoneDraftRadiusM = 0;
-          updateZoneDraftPreview();
-      }
-      updateZoneDrawButton();
+      zoneController.setZoneDrawActive(active);
   }
-
   function setZoneDeleteActive(active) {
-      if (active) {
-          if (tilePickerActive) setTilePickerActive(false);
-          if (roadDrawActive) cancelRoad();
-          if (roadDeleteActive) setRoadDeleteActive(false);
-          if (buildingDrawActive) cancelBuilding();
-          if (buildingEditActive) stopBuildingEdit();
-          if (buildingDeleteActive) setBuildingDeleteActive(false);
-          if (zoneDrawActive) cancelZone();
-      }
-      zoneDeleteActive = active;
-      if (active) {
-          createZoneLayers();
-          map.getCanvas().style.cursor = 'crosshair';
-      } else { clearZoneDeleteHover(); map.getCanvas().style.cursor = ''; }
-      updateZoneDeleteButton();
+      zoneController.setZoneDeleteActive(active);
   }
 
   function startZoneDrawing() {
-      if (pendingZone) { showZoneClassPanel(); return; }
-      if (zoneDrawActive) return logPrompt('info', 'Already drawing.');
-      zoneDraftCenter = null;
-      zoneDraftRadiusM = 0;
-      setZoneDrawActive(true);
+      zoneController.startZoneDrawing();
       logPrompt('bot', 'Zone drawing ON — click to place center, then radius.');
   }
   function startZoneDeleting() {
-      if (zoneDeleteActive) { setZoneDeleteActive(false); return logPrompt('info', 'Zone deletion OFF.'); }
-      setZoneDeleteActive(true);
+      zoneController.startZoneDeleting();
       logPrompt('bot', 'Zone deletion ON.');
   }
   function cancelZone() {
-      if (pendingZone) return cancelPendingZone();
-      if (!zoneDrawActive && !zoneDraftCenter) return logPrompt('info', 'Not drawing a zone.');
-      zoneDraftCenter = null;
-      zoneDraftRadiusM = 0;
-      setZoneDrawActive(false);
-      updateZoneDraftPreview();
+      zoneController.cancelZone();
       logPrompt('bot', 'Zone drawing cancelled.');
   }
   function placeZoneCenter(lon, lat) {
-      zoneDraftCenter = [lon, lat];
-      zoneDraftRadiusM = 0;
-      updateZoneDraftPreview();
-      updateZoneDrawButton();
+      zoneController.placeZoneCenter(lon, lat);
   }
   function placeZoneRadius(lon, lat) {
-      if (!zoneDraftCenter) return;
-      const r = haversineMeters(zoneDraftCenter[0], zoneDraftCenter[1], lon, lat);
-      if (r < 1) return logPrompt('error', 'Radius too small.');
-      zoneDraftRadiusM = r;
-      updateZoneDraftPreview();
-      pendingZone = { center: zoneDraftCenter.slice(), radiusMeters: r };
-      showZoneClassPanel();
-      updateZoneDrawButton();
+      zoneController.placeZoneRadius(lon, lat);
+      if (pendingZone) showZoneClassPanel();
   }
   function showZoneClassPanel() {
-      const panel = document.getElementById('zone-class-panel');
-      if (!panel) return;
-      panel.querySelectorAll('.zone-class-btn').forEach(btn => {
-          btn.classList.toggle('selected', btn.dataset.class === zoneDefaultClass);
-      });
-      panel.classList.remove('hidden');
-      map.dragPan.disable();
-      map.scrollZoom.disable();
-      map.dragRotate.disable();
-      map.boxZoom.disable();
+      zoneController.showZoneClassPanel();
   }
   function hideZoneClassPanel() {
-      const panel = document.getElementById('zone-class-panel');
-      if (panel) panel.classList.add('hidden');
-      map.dragPan.enable();
-      map.scrollZoom.enable();
-      map.dragRotate.enable();
-      map.boxZoom.enable();
+      zoneController.hideZoneClassPanel();
   }
   function commitPendingZone(zoneClass) {
-      if (!pendingZone) return;
-      if (!ZONE_CLASSES[zoneClass]) return logPrompt('error', `Unknown class: "${zoneClass}".`);
-      const id = `Z${++zoneIdCounter}`;
-      zones.set(id, { id, center: pendingZone.center, radiusMeters: pendingZone.radiusMeters, class: zoneClass });
-      pendingZone = null;
-      zoneDraftCenter = null;
-      zoneDraftRadiusM = 0;
-      zoneDefaultClass = zoneClass;
-      hideZoneClassPanel();
-      setZoneDrawActive(false);
-      updateZoneDraftPreview();
-      refreshZones();
-      saveZones();
-      logPrompt('bot', `Created zone ${id} (${zoneClass}, r=${zones.get(id).radiusMeters.toFixed(1)} m).`);
+      const created = zoneController.commitPendingZone(zoneClass);
+      if (created) {
+          const id = `Z${zoneIdCounter}`;
+          logPrompt('bot', `Created zone ${id} (${zoneClass}, r=${zones.get(id).radiusMeters.toFixed(1)} m).`);
+      }
   }
   function cancelPendingZone() {
-      if (!pendingZone) return;
-      pendingZone = null;
-      zoneDraftCenter = null;
-      zoneDraftRadiusM = 0;
-      hideZoneClassPanel();
-      setZoneDrawActive(false);
-      updateZoneDraftPreview();
+      zoneController.cancelPendingZone();
       logPrompt('bot', 'Zone creation cancelled.');
   }
   function deleteZoneById(id) {
-      if (!zones.has(id)) return false;
-      zones.delete(id);
-      if (hoveredDeleteZoneId === id) clearZoneDeleteHover();
-      refreshZones();
-      saveZones();
-      return true;
+      return zoneController.deleteZoneById(id);
   }
   function clearAllZones() {
-      if (!zones.size) return logPrompt('info', 'No zones.');
-      const n = zones.size;
-      zones.clear();
-      clearZoneDeleteHover();
-      refreshZones();
-      saveZones();
-      logPrompt('bot', `${n} zone(s) removed.`);
+      const n = zoneController.clearAllZones();
+      if (n) logPrompt('bot', `${n} zone(s) removed.`);
+      else logPrompt('info', 'No zones.');
   }
   function listZones() {
-      if (!zones.size) return logPrompt('info', 'No zones yet.');
-      logPrompt('info', `Zones: ${zones.size}`);
-      for (const z of zones.values()) {
+      const all = zoneController.listZones();
+      if (!all.length) return logPrompt('info', 'No zones yet.');
+      logPrompt('info', `Zones: ${all.length}`);
+      for (const z of all) {
           const [lon, lat] = z.center;
           logPrompt('info', `  ${z.id}  ${z.class}  r=${z.radiusMeters.toFixed(1)}m  @ ${lat.toFixed(5)},${lon.toFixed(5)}`);
       }
   }
   function setZoneClass(id, cls) {
-      if (!ZONE_CLASSES[cls]) return logPrompt('error', `Unknown class: "${cls}".`);
-      const zone = zones.get(id);
-      if (!zone) return logPrompt('error', `No zone "${id}".`);
-      zone.class = cls;
-      refreshZones();
-      saveZones();
+      const ok = zoneController.setZoneClass(id, cls);
+      if (!ok) return logPrompt('error', `Unknown class: "${cls}".`);
       logPrompt('bot', `Zone ${id} class → ${cls}.`);
   }
   function infoAboutZone(id) {
-      const zone = zones.get(id);
-      if (!zone) return logPrompt('error', `No zone "${id}".`);
-      const [lon, lat] = zone.center;
-      const area = Math.PI * zone.radiusMeters * zone.radiusMeters;
-      logPrompt('info', `Zone ${zone.id}`);
-      logPrompt('info', `  class:  ${zone.class}`);
-      logPrompt('info', `  center: ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-      logPrompt('info', `  radius: ${zone.radiusMeters.toFixed(1)} m`);
-      logPrompt('info', `  area:   ${Math.round(area)} m²`);
+      const info = zoneController.infoAboutZone(id);
+      if (!info) return logPrompt('error', `No zone "${id}".`);
+      logPrompt('info', `Zone ${info.zone.id}`);
+      logPrompt('info', `  class:  ${info.zone.class}`);
+      logPrompt('info', `  center: ${info.lat.toFixed(6)}, ${info.lon.toFixed(6)}`);
+      logPrompt('info', `  radius: ${info.zone.radiusMeters.toFixed(1)} m`);
+      logPrompt('info', `  area:   ${Math.round(info.area)} m²`);
   }
   function saveZones() {
-      try { localStorage.setItem(ZONE_STORAGE_KEY, JSON.stringify([...zones.values()])); }
-      catch (e) { dbg('save zones failed: ' + e.message); }
+      zoneController.saveZonesState();
   }
   function loadZones() {
-      try {
-          const raw = localStorage.getItem(ZONE_STORAGE_KEY);
-          if (!raw) return 0;
-          const arr = JSON.parse(raw);
-          if (!Array.isArray(arr)) return 0;
-          zones.clear();
-          for (const z of arr) {
-              if (!z || !Array.isArray(z.center) || z.center.length !== 2) continue;
-              const id = String(z.id || `Z${++zoneIdCounter}`);
-              const cls = ZONE_CLASSES[z.class] ? z.class : 'Flood';
-              const radius = Number(z.radiusMeters) || 50;
-              zones.set(id, { id, center: [Number(z.center[0]), Number(z.center[1])], radiusMeters: radius, class: cls });
-              const num = parseInt(id.replace(/^Z/, ''), 10);
-              if (Number.isFinite(num) && num > zoneIdCounter) zoneIdCounter = num;
-          }
-          return zones.size;
-      } catch (e) { dbg('load zones failed: ' + e.message); return 0; }
+      return zoneController.loadZonesState();
   }
 
   const promptInput = document.getElementById('prompt-input');

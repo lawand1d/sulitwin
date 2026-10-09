@@ -220,3 +220,342 @@ export function createBuildingInteractionController({
     endBuildingDrag
   };
 }
+
+export function createBuildingLifecycleController({
+  map,
+  customBuildings,
+  getBuildingIdCounter,
+  setBuildingIdCounter,
+  getBuildingDraftCoords,
+  setBuildingDraftCoords,
+  getBuildingDraftCursor,
+  setBuildingDraftCursor,
+  getPendingBuilding,
+  setPendingBuilding,
+  getBuildingDrawActive,
+  setBuildingDrawActive,
+  getBuildingEditActive,
+  setBuildingEditActive,
+  getBuildingDeleteActive,
+  setBuildingDeleteActive,
+  getSelectedBuildingId,
+  setSelectedBuildingId,
+  getBuildingDefaultHeight,
+  setBuildingDefaultHeight,
+  getBuildingDefaultColor,
+  setBuildingDefaultColor,
+  updateSelectionOverlay,
+  refreshBuildings,
+  saveCustomBuildings,
+  state,
+  updateBuildingLabels,
+  updateBuildingBuildButton,
+  updateBuildingDeleteButton,
+  updateBuildingEditButton,
+  createBuildingEditorLayers,
+  createBuildingDeleteLayers,
+  clearBuildingDeleteHover,
+  logPrompt,
+  resolveColor,
+  centerOfCoordinates,
+  setTilePickerActive,
+  cancelRoad,
+  setRoadDeleteActive,
+  cancelZone,
+  setZoneDeleteActive,
+  setZoneDrawActive,
+  tilePickerActive,
+  roadDrawActive,
+  roadDeleteActive,
+  zoneDrawActive,
+  zoneDeleteActive,
+  cancelBuilding,
+  stopBuildingEdit,
+  setBuildingDeleteActiveState,
+  updateBuildingDraftData
+}) {
+  function setBuildingDraftData() {
+    const fillSrc = map.getSource('building-draft-fill-src');
+    if (fillSrc) {
+      const closed = getBuildingDraftCoords().length >= 3 ? [[...getBuildingDraftCoords(), getBuildingDraftCoords()[0]]] : [];
+      fillSrc.setData({
+        type: 'FeatureCollection',
+        features: closed.length ? [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: closed } }] : []
+      });
+    }
+    const lineSrc = map.getSource('building-draft-line-src');
+    if (lineSrc) {
+      const coords = getBuildingDraftCoords().slice();
+      if (getBuildingDrawActive() && !getPendingBuilding() && getBuildingDraftCursor() && coords.length) coords.push(getBuildingDraftCursor());
+      if (getBuildingDrawActive() && coords.length >= 3) coords.push(coords[0]);
+      lineSrc.setData({
+        type: 'FeatureCollection',
+        features: coords.length >= 2 ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }] : []
+      });
+    }
+    const ptSrc = map.getSource('building-draft-points-src');
+    if (ptSrc) {
+      ptSrc.setData({
+        type: 'FeatureCollection',
+        features: getBuildingDraftCoords().map(c => ({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } }))
+      });
+    }
+    if (typeof updateBuildingBuildButton === 'function') updateBuildingBuildButton();
+  }
+
+  function showHeightPanel(defaultHeight) {
+    const panel = document.getElementById('height-panel');
+    const input = document.getElementById('height-input');
+    if (!panel || !input) return;
+    input.value = String(defaultHeight);
+    panel.classList.remove('hidden');
+    map.dragPan.disable();
+    map.scrollZoom.disable();
+    map.dragRotate.disable();
+    map.boxZoom.disable();
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+
+  function hideHeightPanel() {
+    const panel = document.getElementById('height-panel');
+    if (panel) panel.classList.add('hidden');
+    const input = document.getElementById('height-input');
+    if (input) input.blur();
+    map.dragPan.enable();
+    map.scrollZoom.enable();
+    map.dragRotate.enable();
+    map.boxZoom.enable();
+  }
+
+  function focusHeightInput() {
+    const input = document.getElementById('height-input');
+    if (input) { input.focus(); input.select(); }
+  }
+
+  function readHeightInput() {
+    const input = document.getElementById('height-input');
+    if (!input) return getBuildingDefaultHeight();
+    const v = parseFloat(input.value);
+    if (!Number.isFinite(v) || v <= 0) return getBuildingDefaultHeight();
+    return Math.min(500, Math.max(1, v));
+  }
+
+  function commitPendingBuilding() {
+    const pending = getPendingBuilding();
+    if (!pending) return false;
+    const n = pending.coords.length;
+    const height = readHeightInput();
+    const nextIdNumber = getBuildingIdCounter() + 1;
+    setBuildingIdCounter(nextIdNumber);
+    const id = `custom-${nextIdNumber}`;
+    customBuildings.set(id, {
+      id, coords: pending.coords, height, base: 0, color: getBuildingDefaultColor()
+    });
+    setPendingBuilding(null);
+    setBuildingDraftCoords([]);
+    setBuildingDraftCursor(null);
+    hideHeightPanel();
+    setBuildingDrawActive(false);
+    refreshBuildings();
+    if (state.buildingLabels) updateBuildingLabels();
+    saveCustomBuildings();
+    setBuildingDefaultHeight(height);
+    logPrompt('bot', `Added building ${id} (${n} vertices, ${height} m).`);
+    setSelectedBuildingId(id);
+    updateSelectionOverlay();
+    if (typeof updateBuildingEditButton === 'function') updateBuildingEditButton();
+    return true;
+  }
+
+  function cancelPendingBuilding() {
+    if (!getPendingBuilding()) return false;
+    setPendingBuilding(null);
+    setBuildingDraftCoords([]);
+    setBuildingDraftCursor(null);
+    hideHeightPanel();
+    setBuildingDrawActive(false);
+    logPrompt('bot', 'Building creation cancelled.');
+    return true;
+  }
+
+  function startBuildingDrawing() {
+    if (getPendingBuilding()) { focusHeightInput(); return; }
+    if (getBuildingDrawActive()) return logPrompt('info', 'Already drawing.');
+    setBuildingDraftCoords([]);
+    setBuildingDraftCursor(null);
+    setBuildingDrawActive(true);
+    logPrompt('bot', `Building drawing ON — default ${getBuildingDefaultHeight()} m.`);
+    logPrompt('info', 'Click map to add vertices · Enter/first-vertex to finish · Esc cancel.');
+  }
+
+  function startBuildingDeleting() {
+    if (getBuildingDeleteActive()) { setBuildingDeleteActive(false); return logPrompt('info', 'Building deletion OFF.'); }
+    setBuildingDeleteActive(true);
+    logPrompt('bot', 'Building deletion ON.');
+  }
+
+  function addBuildingVertex(lon, lat) {
+    const coords = getBuildingDraftCoords();
+    if (coords.length) {
+      const [lastLon, lastLat] = coords[coords.length - 1];
+      const d = Math.hypot(lon - lastLon, lat - lastLat);
+      if (d < 1e-6) return;
+    }
+    coords.push([lon, lat]);
+    setBuildingDraftCoords(coords);
+    setBuildingDraftCursor([lon, lat]);
+    setBuildingDraftData();
+  }
+
+  function undoBuildingVertex() {
+    if (!getBuildingDrawActive()) return logPrompt('info', 'Not building.');
+    const coords = getBuildingDraftCoords();
+    if (!coords.length) return logPrompt('info', 'No vertices to undo.');
+    coords.pop();
+    setBuildingDraftCoords(coords);
+    setBuildingDraftData();
+    logPrompt('info', `Vertex removed — ${coords.length} left.`);
+  }
+
+  function finishBuilding() {
+    if (!getBuildingDrawActive()) return logPrompt('info', 'Not building.');
+    if (getPendingBuilding()) { focusHeightInput(); return; }
+    if (getBuildingDraftCoords().length < 3) {
+      logPrompt('error', 'A building needs at least 3 vertices — cancelled.');
+      return cancelBuilding();
+    }
+    setPendingBuilding({ coords: getBuildingDraftCoords().slice() });
+    setBuildingDraftCursor(null);
+    showHeightPanel(getBuildingDefaultHeight());
+    setBuildingDraftData();
+  }
+
+  function cancelBuilding() {
+    if (getPendingBuilding()) return cancelPendingBuilding();
+    if (!getBuildingDrawActive() && !getBuildingDraftCoords().length) return logPrompt('info', 'Not building.');
+    setBuildingDraftCoords([]);
+    setBuildingDraftCursor(null);
+    setBuildingDrawActive(false);
+    setBuildingDraftData();
+    logPrompt('bot', 'Building drawing cancelled.');
+  }
+
+  function startBuildingEdit() {
+    if (getBuildingEditActive()) return logPrompt('info', 'Already editing.');
+    if (getPendingBuilding()) cancelPendingBuilding();
+    if (tilePickerActive) setTilePickerActive(false);
+    if (roadDrawActive) cancelRoad();
+    if (roadDeleteActive) setRoadDeleteActive(false);
+    if (getBuildingDrawActive()) cancelBuilding();
+    if (getBuildingDeleteActive()) setBuildingDeleteActive(false);
+    if (zoneDrawActive) cancelZone();
+    if (zoneDeleteActive) setZoneDeleteActive(false);
+    setBuildingEditActive(true);
+    createBuildingEditorLayers();
+    if (typeof updateBuildingEditButton === 'function') updateBuildingEditButton();
+    logPrompt('bot', 'Building edit ON.');
+  }
+
+  function stopBuildingEdit() {
+    if (!getBuildingEditActive()) return logPrompt('info', 'Not editing.');
+    setBuildingEditActive(false);
+    setSelectedBuildingId(null);
+    updateSelectionOverlay();
+    if (typeof updateBuildingEditButton === 'function') updateBuildingEditButton();
+    map.getCanvas().style.cursor = '';
+    saveCustomBuildings();
+    logPrompt('bot', 'Building edit OFF.');
+  }
+
+  function deleteSelectedBuilding() {
+    const id = getSelectedBuildingId();
+    if (!id) return logPrompt('info', 'No building selected.');
+    if (!customBuildings.has(id)) return logPrompt('error', 'Selected building no longer exists.');
+    customBuildings.delete(id);
+    setSelectedBuildingId(null);
+    updateSelectionOverlay();
+    refreshBuildings();
+    if (state.buildingLabels) updateBuildingLabels();
+    saveCustomBuildings();
+    logPrompt('bot', `Deleted ${id}.`);
+  }
+
+  function clearAllCustomBuildings() {
+    if (!customBuildings.size) return logPrompt('info', 'No custom buildings.');
+    const n = customBuildings.size;
+    customBuildings.clear();
+    setSelectedBuildingId(null);
+    updateSelectionOverlay();
+    refreshBuildings();
+    if (state.buildingLabels) updateBuildingLabels();
+    saveCustomBuildings();
+    logPrompt('bot', `${n} custom building(s) removed.`);
+  }
+
+  function listCustomBuildings() {
+    if (!customBuildings.size) return logPrompt('info', 'No custom buildings yet.');
+    logPrompt('info', `Custom buildings: ${customBuildings.size}`);
+    for (const b of customBuildings.values()) {
+      const [lon, lat] = centerOfCoordinates(b.coords);
+      logPrompt('info', `  ${b.id}  ${b.coords.length} vtx  h=${b.height}m  ${b.color}  @ ${lat.toFixed(5)},${lon.toFixed(5)}`);
+    }
+  }
+
+  function setBuildingHeight(n) {
+    const v = Math.max(1, Math.min(500, n));
+    if (getPendingBuilding()) {
+      const input = document.getElementById('height-input');
+      if (input) input.value = String(v);
+      return logPrompt('bot', `Height prompt updated to ${v} m.`);
+    }
+    const selectedId = getSelectedBuildingId();
+    if (selectedId && customBuildings.has(selectedId)) {
+      customBuildings.get(selectedId).height = v;
+      refreshBuildings();
+      saveCustomBuildings();
+      logPrompt('bot', `Height of ${selectedId} set to ${v} m.`);
+    } else {
+      setBuildingDefaultHeight(v);
+      logPrompt('bot', `Default height for new buildings set to ${v} m.`);
+    }
+  }
+
+  function setBuildingColor(name) {
+    const c = resolveColor(name);
+    if (!c) return logPrompt('error', `Unknown color: "${name}"`);
+    const selectedId = getSelectedBuildingId();
+    if (selectedId && customBuildings.has(selectedId)) {
+      customBuildings.get(selectedId).color = c;
+      refreshBuildings();
+      saveCustomBuildings();
+      logPrompt('bot', `Color of ${selectedId} set to ${c}.`);
+    } else {
+      setBuildingDefaultColor(c);
+      if (map.getLayer('building-draft-fill')) map.setPaintProperty('building-draft-fill', 'fill-color', c);
+      logPrompt('bot', `Default color for new buildings set to ${c}.`);
+    }
+  }
+
+  return {
+    setBuildingDraftData,
+    showHeightPanel,
+    hideHeightPanel,
+    focusHeightInput,
+    readHeightInput,
+    commitPendingBuilding,
+    cancelPendingBuilding,
+    startBuildingDrawing,
+    startBuildingDeleting,
+    addBuildingVertex,
+    undoBuildingVertex,
+    finishBuilding,
+    cancelBuilding,
+    startBuildingEdit,
+    stopBuildingEdit,
+    deleteSelectedBuilding,
+    clearAllCustomBuildings,
+    listCustomBuildings,
+    setBuildingHeight,
+    setBuildingColor
+  };
+}
